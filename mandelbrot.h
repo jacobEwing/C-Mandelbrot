@@ -5,7 +5,7 @@
 #include <gmp.h>
 #include "df64.h"
 
-#define MAX_ITER 1024
+#define MAX_ITER_CAP 5000
 
 #ifdef __cplusplus
 extern "C" {
@@ -17,13 +17,22 @@ typedef struct {
 	double greenOffset, greenStagger, greenPeriod;
 	double blueOffset, blueStagger, bluePeriod;
 	double masterOffset, masterStagger;
+	
+	// Stagger masks: parsed integer value of the binary string, and its length
+	int staggerMaskRed, staggerMaskGreen, staggerMaskBlue;
+	int staggerMaskRedLen, staggerMaskGreenLen, staggerMaskBlueLen;
+	
+	int staggerBefore, staggerAfter;
 } Palette;
 
 typedef struct {
+	int max_iter;
 	int calcIterations, calcDisplacement, calcRotation, calcDisplacementXOR, calcPolarCoordXOR;
 	double coefIterations, coefDisplacement, coefRotation, coefDisplacementXOR, coefPolarCoordXOR;
 	double countOffset;
 	double maxRadius;
+	int endCondition;
+	int recursionDepth;
 } Options;
 
 typedef struct {
@@ -40,11 +49,11 @@ typedef struct {
 } Result;
 
 typedef struct {
-	df64 z_real[MAX_ITER + 1];
-	df64 z_imag[MAX_ITER + 1];
-	df64 zmag2[MAX_ITER + 1];
-	df64 dz_real[MAX_ITER + 1];
-	df64 dz_imag[MAX_ITER + 1];
+	df64 z_real[MAX_ITER_CAP + 1];
+	df64 z_imag[MAX_ITER_CAP + 1];
+	df64 zmag2[MAX_ITER_CAP + 1];
+	df64 dz_real[MAX_ITER_CAP + 1];
+	df64 dz_imag[MAX_ITER_CAP + 1];
 	int length;
 	int escaped;
 	int escape_iteration;
@@ -59,7 +68,8 @@ extern ReferenceOrbit ref;
 df64 mpf_to_df64(mpf_t x);
 void compute_reference_orbit(mpf_t cx, mpf_t cy, mpf_t zoom);
 Result mandelbrot_perturbation(df64 dc_r, df64 dc_i, int max_iter);
-Result mandelbrot_calc(double c, double ci, int max_iter);
+Result mandelbrot_calc(double c, double ci, int accuracy, int recursion_depth);
+Result mandelbrot_calc_df64(df64 c, df64 ci, int accuracy, int recursion_depth);
 uint32_t create_colour(const Result *r);
 
 #ifdef __cplusplus

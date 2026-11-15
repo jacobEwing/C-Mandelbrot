@@ -12,13 +12,20 @@ RenderConfig config = {
 		.redOffset = -0.47, .redStagger = 0, .redPeriod = 1,
 		.greenOffset = 0, .greenStagger = 0, .greenPeriod = 1,
 		.blueOffset = 0.7, .blueStagger = 0, .bluePeriod = 1,
-		.masterOffset = 0, .masterStagger = 0
+		.masterOffset = 0, .masterStagger = 0,
+		.staggerMaskRed = 2, .staggerMaskRedLen = 2,
+		.staggerMaskGreen = 2, .staggerMaskGreenLen = 2,
+		.staggerMaskBlue = 2, .staggerMaskBlueLen = 2,
+		.staggerBefore = 1, .staggerAfter = 0
 	},
 	.options = {
+		.max_iter = 1024,
 		.calcIterations = 1, .calcDisplacement = 0, .calcRotation = 0, .calcDisplacementXOR = 0, .calcPolarCoordXOR = 0,
 		.coefIterations = 1, .coefDisplacement = 1, .coefRotation = 1, .coefDisplacementXOR = 1, .coefPolarCoordXOR = 1,
 		.countOffset = 0,
-		.maxRadius = 4.0
+		.maxRadius = 4.0,
+		.endCondition = 0,
+		.recursionDepth = 1
 	}
 };
 
@@ -42,7 +49,7 @@ static double rel_ang(double x1, double y1, double x2, double y2) {
 }
 
 uint32_t create_colour(const Result *r) {
-	if (r->count >= MAX_ITER) {
+	if (r->count >= config.options.max_iter * config.options.recursionDepth) {
 		return 0xFF000000;
 	}
 
@@ -53,6 +60,14 @@ uint32_t create_colour(const Result *r) {
 	double radius = sqrt(dz * dz + dzi * dzi);
 	const double PI = 3.14159265358979323846;
 
+	double staggerR = 0.0, staggerG = 0.0, staggerB = 0.0;
+
+	if (config.palette.staggerBefore) {
+		staggerR = ((1 << ((int)fabs(r->count) % config.palette.staggerMaskRedLen)) & config.palette.staggerMaskRed) ? 1.0 : 0.0;
+		staggerG = ((1 << ((int)fabs(r->count) % config.palette.staggerMaskGreenLen)) & config.palette.staggerMaskGreen) ? 1.0 : 0.0;
+		staggerB = ((1 << ((int)fabs(r->count) % config.palette.staggerMaskBlueLen)) & config.palette.staggerMaskBlue) ? 1.0 : 0.0;
+	}
+
 	if (config.options.calcIterations) {
 		countAccum += r->count * config.options.coefIterations;
 	}
@@ -60,45 +75,141 @@ uint32_t create_colour(const Result *r) {
 		if (r->count > 1.0) countAccum += radius * config.options.coefDisplacement;
 	}
 	if (config.options.calcRotation) {
-		if (r->count > 1.0) countAccum += ((double)MAX_ITER / (r->count + 1.0)) * (0.5 + sin(ang) / 2.0) * config.options.coefRotation;
+		if (r->count > 1.0) countAccum += ((double)config.options.max_iter / (r->count + 1.0)) * (0.5 + sin(ang) / 2.0) * config.options.coefRotation;
 	}
+
+	if (config.palette.staggerAfter) {
+		staggerR += ((1 << ((int)fabs(countAccum) % config.palette.staggerMaskRedLen)) & config.palette.staggerMaskRed) ? 1.0 : 0.0;
+		staggerG += ((1 << ((int)fabs(countAccum) % config.palette.staggerMaskGreenLen)) & config.palette.staggerMaskGreen) ? 1.0 : 0.0;
+		staggerB += ((1 << ((int)fabs(countAccum) % config.palette.staggerMaskBlueLen)) & config.palette.staggerMaskBlue) ? 1.0 : 0.0;
+	}
+
 	if (config.options.calcDisplacementXOR) {
 		if (r->count > 1.0) {
-			int xa = (int)(MAX_ITER * dzi);
-			int xb = (int)(MAX_ITER * dz);
-			countAccum += config.options.coefDisplacementXOR * (double)(xa ^ xb) / (double)MAX_ITER;
+			int xa = (int)(config.options.max_iter * dzi);
+			int xb = (int)(config.options.max_iter * dz);
+			countAccum += config.options.coefDisplacementXOR * (double)(xa ^ xb) / (double)config.options.max_iter;
 		} else {
-			int xa = (int)(MAX_ITER * r->zi);
-			int xb = (int)(MAX_ITER * r->z);
-			countAccum += config.options.coefDisplacementXOR * (double)(xa ^ xb) / (double)MAX_ITER;
+			int xa = (int)(config.options.max_iter * r->zi);
+			int xb = (int)(config.options.max_iter * r->z);
+			countAccum += config.options.coefDisplacementXOR * (double)(xa ^ xb) / (double)config.options.max_iter;
 		}
 	}
 	if (config.options.calcPolarCoordXOR) {
 		if (r->count > 1.0) {
-			int xa = (int)(MAX_ITER * ang);
-			int xb = (int)(MAX_ITER * radius);
-			countAccum += config.options.coefPolarCoordXOR * (double)(xa ^ xb) / (double)MAX_ITER;
+			int xa = (int)(config.options.max_iter * ang);
+			int xb = (int)(config.options.max_iter * radius);
+			countAccum += config.options.coefPolarCoordXOR * (double)(xa ^ xb) / (double)config.options.max_iter;
 		} else {
 			double rad = sqrt(r->z * r->z + r->zi * r->zi);
 			double theta = sin(rel_ang(0.0, 0.0, r->z, r->zi) * 2.0 + PI / 2.0) * PI;
 			theta += sin(rad * 4.0) * 2.0 / rad;
-			int xa = (int)(MAX_ITER * theta);
-			int xb = (int)(MAX_ITER * rad);
-			countAccum += config.options.coefPolarCoordXOR * (double)(xa ^ xb) / (double)MAX_ITER;
+			int xa = (int)(config.options.max_iter * theta);
+			int xb = (int)(config.options.max_iter * rad);
+			countAccum += config.options.coefPolarCoordXOR * (double)(xa ^ xb) / (double)config.options.max_iter;
 		}
 	}
 
 	ang = countAccum * 2.0 * PI / config.palette.colourWavePeriod;
 
-	double red = 127.5 + 127.5 * sin(ang * config.palette.redPeriod + config.palette.redOffset + config.palette.masterOffset);
-	double green = 127.5 + 127.5 * sin(ang * config.palette.greenPeriod + config.palette.greenOffset + config.palette.masterOffset);
-	double blue = 127.5 + 127.5 * sin(ang * config.palette.bluePeriod + config.palette.blueOffset + config.palette.masterOffset);
+	double red = 127.5 + 127.5 * sin(ang * config.palette.redPeriod + config.palette.redOffset + config.palette.masterOffset + (config.palette.redStagger + config.palette.masterStagger) * staggerR);
+	double green = 127.5 + 127.5 * sin(ang * config.palette.greenPeriod + config.palette.greenOffset + config.palette.masterOffset + (config.palette.greenStagger + config.palette.masterStagger) * staggerG);
+	double blue = 127.5 + 127.5 * sin(ang * config.palette.bluePeriod + config.palette.blueOffset + config.palette.masterOffset + (config.palette.blueStagger + config.palette.masterStagger) * staggerB);
 
 	uint8_t r_val = (uint8_t)(red + 0.5);
 	uint8_t g_val = (uint8_t)(green + 0.5);
 	uint8_t b_val = (uint8_t)(blue + 0.5);
 
 	return (255 << 24) | (r_val << 16) | (g_val << 8) | b_val;
+}
+
+typedef struct {
+	int count;
+	df64 z, zi;
+	df64 dz, dzi;
+} ResultDf64;
+
+static ResultDf64 mandelbrot_calc_df64_inner(df64 c, df64 ci, int accuracy, int recursion_depth) {
+	df64 zr = {0.0, 0.0}, zi = {0.0, 0.0};
+	df64 zsq = {0.0, 0.0}, zisq = {0.0, 0.0};
+	df64 maxr = df_from_double(config.options.maxRadius);
+	int i = 0;
+
+	switch (config.options.endCondition) {
+		case 1: /* multiplication */
+			while (i < accuracy && df_lt(df_mul(zsq, zisq), maxr)) {
+				zi = df_add(df_mul_d(df_mul(zr, zi), 2.0), ci);
+				zr = df_add(df_sub(zsq, zisq), c);
+				zsq = df_mul(zr, zr);
+				zisq = df_mul(zi, zi);
+				i++;
+			}
+			break;
+		case 2: /* subtraction */
+			while (i < accuracy && df_lt(df_abs(df_sub(zsq, zisq)), maxr)) {
+				zi = df_add(df_mul_d(df_mul(zr, zi), 2.0), ci);
+				zr = df_add(df_sub(zsq, zisq), c);
+				zsq = df_mul(zr, zr);
+				zisq = df_mul(zi, zi);
+				i++;
+			}
+			break;
+		case 3: /* fluffy cloud */
+			while (i < accuracy && df_lt(df_add(df_abs(zr), df_abs(zi)), maxr)) {
+				zi = df_add(df_mul_d(df_mul(zr, zi), 2.0), ci);
+				zr = df_add(df_sub(zsq, zisq), c);
+				zsq = df_mul(zr, zr);
+				zisq = df_mul(zi, zi);
+				i++;
+			}
+			break;
+		case 4: /* foliage */
+			while (i < accuracy && df_lt(df_abs(df_sub(df_abs(zr), df_abs(zi))), maxr)) {
+				zi = df_add(df_mul_d(df_mul(zr, zi), 2.0), ci);
+				zr = df_add(df_sub(zsq, zisq), c);
+				zsq = df_mul(zr, zr);
+				zisq = df_mul(zi, zi);
+				i++;
+			}
+			break;
+		default: /* addition */
+			while (i < accuracy && df_lt(df_add(zsq, zisq), maxr)) {
+				zi = df_add(df_mul_d(df_mul(zr, zi), 2.0), ci);
+				zr = df_add(df_sub(zsq, zisq), c);
+				zsq = df_mul(zr, zr);
+				zisq = df_mul(zi, zi);
+				i++;
+			}
+	}
+
+	ResultDf64 res;
+	res.count = i;
+	res.z = zr;
+	res.zi = zi;
+	res.dz = df_sub(zr, c);
+	res.dzi = df_sub(zi, ci);
+
+	if (recursion_depth > 1 && !(df_eq(zr, c) && df_eq(zi, ci))) {
+		ResultDf64 r2 = mandelbrot_calc_df64_inner(res.dz, res.dzi, accuracy, recursion_depth - 1);
+		res.count += r2.count;
+		res.z = df_add(res.z, r2.z);
+		res.zi = df_add(res.zi, r2.zi);
+		res.dz = df_add(res.dz, r2.dz);
+		res.dzi = df_add(res.dzi, r2.dzi);
+	}
+
+	return res;
+}
+
+Result mandelbrot_calc_df64(df64 c, df64 ci, int accuracy, int recursion_depth) {
+	ResultDf64 r = mandelbrot_calc_df64_inner(c, ci, accuracy, recursion_depth);
+	Result out;
+	out.count = r.count;
+	out.z = df_to_double(r.z);
+	out.zi = df_to_double(r.zi);
+	out.dz = df_to_double(r.dz);
+	out.dzi = df_to_double(r.dzi);
+	return out;
 }
 
 df64 mpf_to_df64(mpf_t x) {
@@ -124,7 +235,7 @@ static void compute_orbit_gmp(mpf_t Cx, mpf_t Cy) {
 
 	ref.c_real = mpf_to_df64(Cr);
 	ref.c_imag = mpf_to_df64(Ci);
-	ref.length = MAX_ITER + 1;
+	ref.length = config.options.max_iter + 1;
 	ref.escaped = 0;
 	ref.escape_iteration = 0;
 	ref.near_boundary_count = 0;
@@ -136,7 +247,7 @@ static void compute_orbit_gmp(mpf_t Cx, mpf_t Cy) {
 	ref.dz_real[0] = df_sub(df_from_double(0.0), ref.c_real);
 	ref.dz_imag[0] = df_sub(df_from_double(0.0), ref.c_imag);
 
-	for (int n = 1; n <= MAX_ITER; n++) {
+	for (int n = 1; n <= config.options.max_iter; n++) {
 		mpf_mul(tmp1, Zr, Zi);
 		mpf_mul_ui(tmp1, tmp1, 2);
 		mpf_add(tmp1, tmp1, Ci);
@@ -181,7 +292,7 @@ static void compute_orbit_gmp(mpf_t Cx, mpf_t Cy) {
 void compute_reference_orbit(mpf_t cx, mpf_t cy, mpf_t zoom) {
 	compute_orbit_gmp(cx, cy);
 
-	if (ref.escaped && ref.escape_iteration < MAX_ITER - 100) {
+	if (ref.escaped && ref.escape_iteration < config.options.max_iter - 100) {
 		mpf_t test_x, test_y, offset;
 		mpf_init2(test_x, 256); mpf_init2(test_y, 256); mpf_init2(offset, 256);
 
@@ -323,21 +434,74 @@ Result mandelbrot_perturbation(df64 dc_r, df64 dc_i, int max_iter) {
 	return res;
 }
 
-Result mandelbrot_calc(double c, double ci, int max_iter) {
-	double zr = 0.0, zi = 0.0;
-	int i;
-	for (i = 0; i < max_iter; i++) {
-		double zr2 = zr * zr;
-		double zi2 = zi * zi;
-		if (zr2 + zi2 > config.options.maxRadius) break;
-		zi = 2.0 * zr * zi + ci;
-		zr = zr2 - zi2 + c;
+Result mandelbrot_calc(double c, double ci, int accuracy, int recursion_depth) {
+	double zr = 0.0, zi = 0.0, zsq = 0.0, zisq = 0.0;
+	int i = 0;
+	double maxr = config.options.maxRadius;
+
+	switch (config.options.endCondition) {
+		case 1: /* multiplication */
+			while (i < accuracy && zsq * zisq < maxr) {
+				zi = zr * zi * 2.0 + ci;
+				zr = zsq - zisq + c;
+				zsq = zr * zr;
+				zisq = zi * zi;
+				i++;
+			}
+			break;
+		case 2: /* subtraction */
+			while (i < accuracy && fabs(zsq - zisq) < maxr) {
+				zi = zr * zi * 2.0 + ci;
+				zr = zsq - zisq + c;
+				zsq = zr * zr;
+				zisq = zi * zi;
+				i++;
+			}
+			break;
+		case 3: /* fluffy cloud */
+			while (i < accuracy && fabs(zr) + fabs(zi) < maxr) {
+				zi = zr * zi * 2.0 + ci;
+				zr = zsq - zisq + c;
+				zsq = zr * zr;
+				zisq = zi * zi;
+				i++;
+			}
+			break;
+		case 4: /* foliage */
+			while (i < accuracy && fabs(fabs(zr) - fabs(zi)) < maxr) {
+				zi = zr * zi * 2.0 + ci;
+				zr = zsq - zisq + c;
+				zsq = zr * zr;
+				zisq = zi * zi;
+				i++;
+			}
+			break;
+		default: /* 0 = addition */
+			while (i < accuracy && zsq + zisq < maxr) {
+				zi = zr * zi * 2.0 + ci;
+				zr = zsq - zisq + c;
+				zsq = zr * zr;
+				zisq = zi * zi;
+				i++;
+			}
 	}
+
 	Result res;
 	res.count = i;
 	res.z = zr;
 	res.zi = zi;
 	res.dz = zr - c;
 	res.dzi = zi - ci;
+
+	if (recursion_depth > 1 && (zr != c || zi != ci)) {
+		Result r2 = mandelbrot_calc(res.dz, res.dzi, accuracy, recursion_depth - 1);
+		res.count += r2.count;
+		res.z += r2.z;
+		res.zi += r2.zi;
+		res.dz += r2.dz;
+		res.dzi += r2.dzi;
+	}
+
 	return res;
 }
+

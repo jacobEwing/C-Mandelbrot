@@ -95,7 +95,7 @@ static void render_row_double(uint32_t *pixels, int y, double x_min, double y_mi
 	double ci = y_min + y * dy;
 	for (int x = 0; x < render_width; x++) {
 		double cr = x_min + x * dx;
-		Result r = mandelbrot_calc(cr, ci, MAX_ITER);
+		Result r = mandelbrot_calc(cr, ci, config.options.max_iter, config.options.recursionDepth);
 		g_results[y * render_width + x] = r;
 		pixels[y * render_width + x] = create_colour(&r);
 		g_counts[y * render_width + x] = (uint16_t)r.count;
@@ -108,7 +108,22 @@ static void render_row_perturbation(uint32_t *pixels, int y,
 	df64 dci = df_add(df_mul_d(dy_df, (double)(y - render_height / 2)), ref_offset_y);
 	for (int x = 0; x < render_width; x++) {
 		df64 dc = df_add(df_mul_d(dx_df, (double)(x - render_width / 2)), ref_offset_x);
-		Result r = mandelbrot_perturbation(dc, dci, MAX_ITER);
+		Result r = mandelbrot_perturbation(dc, dci, config.options.max_iter);
+		g_results[y * render_width + x] = r;
+		pixels[y * render_width + x] = create_colour(&r);
+		g_counts[y * render_width + x] = (uint16_t)r.count;
+	}
+}
+
+static void render_row_df64_direct(uint32_t *pixels, int y,
+                                   df64 dx_df, df64 dy_df,
+                                   df64 view_cx_df, df64 view_cy_df) {
+	df64 y_off = df_mul_d(dy_df, (double)(y - render_height / 2));
+	df64 ci_df = df_add(view_cy_df, y_off);
+	for (int x = 0; x < render_width; x++) {
+		df64 x_off = df_mul_d(dx_df, (double)(x - render_width / 2));
+		df64 cr_df = df_add(view_cx_df, x_off);
+		Result r = mandelbrot_calc_df64(cr_df, ci_df, config.options.max_iter, config.options.recursionDepth);
 		g_results[y * render_width + x] = r;
 		pixels[y * render_width + x] = create_colour(&r);
 		g_counts[y * render_width + x] = (uint16_t)r.count;
@@ -124,8 +139,13 @@ void begin_render(mpf_t cx, mpf_t cy, mpf_t zoom,
 	double cy_d = mpf_get_d(cy);
 	double aspect = (double)render_height / render_width;
 
-	render_state.use_perturbation = (zoom_d < 1e-12);
+	render_state.use_perturbation = (zoom_d < 1e-28)
+		&& (config.options.endCondition == 0)
+		&& (config.options.recursionDepth == 1);
+	render_state.use_df64_direct = (zoom_d < 1e-12) && !render_state.use_perturbation;
 	render_state.next_strip_y = 0;
+	render_state.view_cx_df = mpf_to_df64(cx);
+	render_state.view_cy_df = mpf_to_df64(cy);
 	render_state.t_start = SDL_GetTicks();
 
 	double preview_s, preview_off_x, preview_off_y;
@@ -160,6 +180,19 @@ void begin_render(mpf_t cx, mpf_t cy, mpf_t zoom,
 		render_state.ref_off_x_df = ref.offset_x;
 		render_state.ref_off_y_df = ref.offset_y;
 		mpf_clear(dx_mpf); mpf_clear(dy_mpf); mpf_clear(aspect_mpf);
+	} else if (render_state.use_df64_direct) {
+		printf("[df64 direct mode: endCondition=%d recursion=%d]\n",
+			config.options.endCondition, config.options.recursionDepth);
+
+		mpf_t dx_mpf, dy_mpf, aspect_mpf;
+		mpf_init2(dx_mpf, 256); mpf_init2(dy_mpf, 256); mpf_init2(aspect_mpf, 256);
+		mpf_div_ui(dx_mpf, zoom, render_width);
+		mpf_set_d(aspect_mpf, aspect);
+		mpf_mul(dy_mpf, zoom, aspect_mpf);
+		mpf_div_ui(dy_mpf, dy_mpf, render_height);
+		render_state.dx_df = mpf_to_df64(dx_mpf);
+		render_state.dy_df = mpf_to_df64(dy_mpf);
+		mpf_clear(dx_mpf); mpf_clear(dy_mpf); mpf_clear(aspect_mpf);
 	} else {
 		double width = zoom_d;
 		double height = width * aspect;
@@ -180,8 +213,13 @@ int render_strip(uint32_t *pixels, SDL_Texture *tex, SDL_Renderer *ren) {
 
 	#pragma omp parallel for schedule(dynamic, 1)
 	for (int y = y_start; y < y_end; y++) {
-		if (render_state.use_perturbation) render_row_perturbation(pixels, y, render_state.dx_df, render_state.dy_df, render_state.ref_off_x_df, render_state.ref_off_y_df);
-		else render_row_double(pixels, y, render_state.x_min, render_state.y_min, render_state.dx, render_state.dy);
+		if (render_state.use_perturbation) {
+			render_row_perturbation(pixels, y, render_state.dx_df, render_state.dy_df, render_state.ref_off_x_df, render_state.ref_off_y_df);
+		} else if (render_state.use_df64_direct) {
+			render_row_df64_direct(pixels, y, render_state.dx_df, render_state.dy_df, render_state.view_cx_df, render_state.view_cy_df);
+		} else {
+			render_row_double(pixels, y, render_state.x_min, render_state.y_min, render_state.dx, render_state.dy);
+		}
 	}
 
 	SDL_Rect rect = { 0, y_start, render_width, y_end - y_start };
@@ -202,7 +240,7 @@ int render_strip(uint32_t *pixels, SDL_Texture *tex, SDL_Renderer *ren) {
 			int in_set = 0, near_ref = 0, other = 0;
 			for (int i = 0; i < render_width * render_height; i++) {
 				int c = g_counts[i];
-				if (c >= MAX_ITER) in_set++;
+				if (c >= config.options.max_iter) in_set++;
 				else if (abs(c - ref.escape_iteration) < 10) near_ref++;
 				else other++;
 			}

@@ -83,4 +83,26 @@ static inline int df_gt(df64 a, df64 b) {
 	return a.lo > b.lo;
 }
 
+static inline int df_lt(df64 a, df64 b) {
+	if (a.hi < b.hi) return 1;
+	if (a.hi > b.hi) return 0;
+	return a.lo < b.lo;
+}
+
+static inline int df_eq(df64 a, df64 b) {
+	return a.hi == b.hi && a.lo == b.lo;
+}
+
+static inline df64 df_neg(df64 a) {
+	df64 r = { -a.hi, -a.lo };
+	return r;
+}
+
+static inline df64 df_abs(df64 a) {
+	if (a.hi < 0.0) return df_neg(a);
+	if (a.hi > 0.0) return a;
+	df64 r = { fabs(a.lo), 0.0 };
+	return r;
+}
+
 #endif
