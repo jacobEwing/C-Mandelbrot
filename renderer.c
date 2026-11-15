@@ -8,8 +8,23 @@
 #include <omp.h>
 #endif
 
+int render_width = 800;
+int render_height = 600;
+Result *g_results = NULL;
+uint16_t *g_counts = NULL;
 RenderState render_state = { 0 };
-uint16_t g_counts[WINDOW_WIDTH * WINDOW_HEIGHT];
+
+void set_render_size(int w, int h) {
+	if (w < 1) w = 1;
+	if (h < 1) h = 1;
+	if (w == render_width && h == render_height && g_results != NULL) return;
+	render_width = w;
+	render_height = h;
+	free(g_results);
+	g_results = (Result *)calloc((size_t)w * h, sizeof(Result));
+	free(g_counts);
+	g_counts = (uint16_t *)calloc((size_t)w * h, sizeof(uint16_t));
+}
 
 int compute_preview_transform(mpf_t cx, mpf_t cy, mpf_t zoom,
                               mpf_t last_cx, mpf_t last_cy, mpf_t last_zoom,
@@ -27,8 +42,8 @@ int compute_preview_transform(mpf_t cx, mpf_t cy, mpf_t zoom,
 		return 0;
 	}
 
-	mpf_set_d(w, WINDOW_WIDTH);
-	mpf_set_d(h, WINDOW_HEIGHT);
+	mpf_set_d(w, render_width);
+	mpf_set_d(h, render_height);
 
 	mpf_sub(temp, last_cx, cx);
 	mpf_mul(temp, temp, w);
@@ -58,45 +73,45 @@ int compute_preview_transform(mpf_t cx, mpf_t cy, mpf_t zoom,
 
 void fill_scaled_background(uint32_t *pixels, const uint32_t *last_pixels,
                             double s, double off_x, double off_y) {
-	for (int y = 0; y < WINDOW_HEIGHT; y++) {
+	for (int y = 0; y < render_height; y++) {
 		double src_y = (y - off_y) / s;
 		int sy = (int)src_y;
-		int row_in_bounds = (src_y >= 0 && sy < WINDOW_HEIGHT);
-		for (int x = 0; x < WINDOW_WIDTH; x++) {
+		int row_in_bounds = (src_y >= 0 && sy < render_height);
+		for (int x = 0; x < render_width; x++) {
 			uint32_t px = 0xFF000000;
 			if (row_in_bounds) {
 				double src_x = (x - off_x) / s;
 				int sx = (int)src_x;
-				if (src_x >= 0 && sx < WINDOW_WIDTH) {
-					px = last_pixels[sy * WINDOW_WIDTH + sx];
+				if (src_x >= 0 && sx < render_width) {
+					px = last_pixels[sy * render_width + sx];
 				}
 			}
-			pixels[y * WINDOW_WIDTH + x] = px;
+			pixels[y * render_width + x] = px;
 		}
 	}
 }
 
 static void render_row_double(uint32_t *pixels, int y, double x_min, double y_min, double dx, double dy) {
 	double ci = y_min + y * dy;
-	for (int x = 0; x < WINDOW_WIDTH; x++) {
+	for (int x = 0; x < render_width; x++) {
 		double cr = x_min + x * dx;
 		Result r = mandelbrot_calc(cr, ci, MAX_ITER);
-		g_results[y * WINDOW_WIDTH + x] = r;
-		pixels[y * WINDOW_WIDTH + x] = create_colour(&r);
-		g_counts[y * WINDOW_WIDTH + x] = (uint16_t)r.count;
+		g_results[y * render_width + x] = r;
+		pixels[y * render_width + x] = create_colour(&r);
+		g_counts[y * render_width + x] = (uint16_t)r.count;
 	}
 }
 
 static void render_row_perturbation(uint32_t *pixels, int y,
                                     df64 dx_df, df64 dy_df,
                                     df64 ref_offset_x, df64 ref_offset_y) {
-	df64 dci = df_add(df_mul_d(dy_df, (double)(y - WINDOW_HEIGHT / 2)), ref_offset_y);
-	for (int x = 0; x < WINDOW_WIDTH; x++) {
-		df64 dc = df_add(df_mul_d(dx_df, (double)(x - WINDOW_WIDTH / 2)), ref_offset_x);
+	df64 dci = df_add(df_mul_d(dy_df, (double)(y - render_height / 2)), ref_offset_y);
+	for (int x = 0; x < render_width; x++) {
+		df64 dc = df_add(df_mul_d(dx_df, (double)(x - render_width / 2)), ref_offset_x);
 		Result r = mandelbrot_perturbation(dc, dci, MAX_ITER);
-		g_results[y * WINDOW_WIDTH + x] = r;
-		pixels[y * WINDOW_WIDTH + x] = create_colour(&r);
-		g_counts[y * WINDOW_WIDTH + x] = (uint16_t)r.count;
+		g_results[y * render_width + x] = r;
+		pixels[y * render_width + x] = create_colour(&r);
+		g_counts[y * render_width + x] = (uint16_t)r.count;
 	}
 }
 
@@ -107,7 +122,7 @@ void begin_render(mpf_t cx, mpf_t cy, mpf_t zoom,
 	double zoom_d = mpf_get_d(zoom);
 	double cx_d = mpf_get_d(cx);
 	double cy_d = mpf_get_d(cy);
-	double aspect = (double)WINDOW_HEIGHT / WINDOW_WIDTH;
+	double aspect = (double)render_height / render_width;
 
 	render_state.use_perturbation = (zoom_d < 1e-12);
 	render_state.next_strip_y = 0;
@@ -119,13 +134,10 @@ void begin_render(mpf_t cx, mpf_t cy, mpf_t zoom,
 	if (have_preview) {
 		fill_scaled_background(pixels, last_pixels, preview_s, preview_off_x, preview_off_y);
 	} else {
-		memset(pixels, 0, WINDOW_WIDTH * WINDOW_HEIGHT * sizeof(uint32_t));
+		memset(pixels, 0, (size_t)render_width * render_height * sizeof(uint32_t));
 	}
 
-	SDL_UpdateTexture(tex, NULL, pixels, WINDOW_WIDTH * sizeof(uint32_t));
-	SDL_RenderClear(ren);
-	SDL_RenderCopy(ren, tex, NULL, NULL);
-	SDL_RenderPresent(ren);
+	SDL_UpdateTexture(tex, NULL, pixels, render_width * sizeof(uint32_t));
 
 	gmp_printf("[view cx=%.80Ff cy=%.80Ff zoom=%.80Ff]\n", cx, cy, zoom);
 
@@ -139,10 +151,10 @@ void begin_render(mpf_t cx, mpf_t cy, mpf_t zoom,
 
 		mpf_t dx_mpf, dy_mpf, aspect_mpf;
 		mpf_init2(dx_mpf, 256); mpf_init2(dy_mpf, 256); mpf_init2(aspect_mpf, 256);
-		mpf_div_ui(dx_mpf, zoom, WINDOW_WIDTH);
+		mpf_div_ui(dx_mpf, zoom, render_width);
 		mpf_set_d(aspect_mpf, aspect);
 		mpf_mul(dy_mpf, zoom, aspect_mpf);
-		mpf_div_ui(dy_mpf, dy_mpf, WINDOW_HEIGHT);
+		mpf_div_ui(dy_mpf, dy_mpf, render_height);
 		render_state.dx_df = mpf_to_df64(dx_mpf);
 		render_state.dy_df = mpf_to_df64(dy_mpf);
 		render_state.ref_off_x_df = ref.offset_x;
@@ -153,8 +165,8 @@ void begin_render(mpf_t cx, mpf_t cy, mpf_t zoom,
 		double height = width * aspect;
 		render_state.x_min = cx_d - width / 2.0;
 		render_state.y_min = cy_d - height / 2.0;
-		render_state.dx = width / WINDOW_WIDTH;
-		render_state.dy = height / WINDOW_HEIGHT;
+		render_state.dx = width / render_width;
+		render_state.dy = height / render_height;
 	}
 
 	render_state.t_render_start = SDL_GetTicks();
@@ -164,7 +176,7 @@ void begin_render(mpf_t cx, mpf_t cy, mpf_t zoom,
 int render_strip(uint32_t *pixels, SDL_Texture *tex, SDL_Renderer *ren) {
 	int y_start = render_state.next_strip_y;
 	int y_end = y_start + STRIP_HEIGHT;
-	if (y_end > WINDOW_HEIGHT) y_end = WINDOW_HEIGHT;
+	if (y_end > render_height) y_end = render_height;
 
 	#pragma omp parallel for schedule(dynamic, 1)
 	for (int y = y_start; y < y_end; y++) {
@@ -172,15 +184,12 @@ int render_strip(uint32_t *pixels, SDL_Texture *tex, SDL_Renderer *ren) {
 		else render_row_double(pixels, y, render_state.x_min, render_state.y_min, render_state.dx, render_state.dy);
 	}
 
-	SDL_Rect rect = { 0, y_start, WINDOW_WIDTH, y_end - y_start };
-	SDL_UpdateTexture(tex, &rect, pixels + y_start * WINDOW_WIDTH, WINDOW_WIDTH * sizeof(uint32_t));
-	SDL_RenderClear(ren);
-	SDL_RenderCopy(ren, tex, NULL, NULL);
-	SDL_RenderPresent(ren);
+	SDL_Rect rect = { 0, y_start, render_width, y_end - y_start };
+	SDL_UpdateTexture(tex, &rect, pixels + y_start * render_width, render_width * sizeof(uint32_t));
 
 	render_state.next_strip_y = y_end;
 
-	if (render_state.next_strip_y >= WINDOW_HEIGHT) {
+	if (render_state.next_strip_y >= render_height) {
 		Uint32 t_end = SDL_GetTicks();
 		int nthreads = 1;
 		#ifdef _OPENMP
@@ -191,13 +200,14 @@ int render_strip(uint32_t *pixels, SDL_Texture *tex, SDL_Renderer *ren) {
 
 		if (render_state.use_perturbation) {
 			int in_set = 0, near_ref = 0, other = 0;
-			for (int i = 0; i < WINDOW_WIDTH * WINDOW_HEIGHT; i++) {
+			for (int i = 0; i < render_width * render_height; i++) {
 				int c = g_counts[i];
 				if (c >= MAX_ITER) in_set++;
 				else if (abs(c - ref.escape_iteration) < 10) near_ref++;
 				else other++;
 			}
-			int ref_count = g_counts[(WINDOW_HEIGHT / 2) * WINDOW_WIDTH + WINDOW_WIDTH / 2];
+			int mid_idx = (render_height / 2) * render_width + render_width / 2;
+			int ref_count = g_counts[mid_idx];
 			printf("[counts: in_set=%d near_ref=%d other=%d ref_pixel_count=%d (ref_iter=%d)]\n",
 				in_set, near_ref, other, ref_count, ref.escape_iteration);
 		}
@@ -207,14 +217,11 @@ int render_strip(uint32_t *pixels, SDL_Texture *tex, SDL_Renderer *ren) {
 }
 
 void redraw_palette(uint32_t *pixels, SDL_Texture *tex, SDL_Renderer *ren) {
-	for (int y = 0; y < WINDOW_HEIGHT; y++) {
-		for (int x = 0; x < WINDOW_WIDTH; x++) {
-			int idx = y * WINDOW_WIDTH + x;
+	for (int y = 0; y < render_height; y++) {
+		for (int x = 0; x < render_width; x++) {
+			int idx = y * render_width + x;
 			pixels[idx] = create_colour(&g_results[idx]);
 		}
 	}
-	SDL_UpdateTexture(tex, NULL, pixels, WINDOW_WIDTH * sizeof(uint32_t));
-	SDL_RenderClear(ren);
-	SDL_RenderCopy(ren, tex, NULL, NULL);
-	SDL_RenderPresent(ren);
+	SDL_UpdateTexture(tex, NULL, pixels, render_width * sizeof(uint32_t));
 }

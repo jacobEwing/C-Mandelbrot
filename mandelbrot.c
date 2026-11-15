@@ -5,7 +5,6 @@
 #include <math.h>
 
 ReferenceOrbit ref;
-Result g_results[WINDOW_WIDTH * WINDOW_HEIGHT];
 
 RenderConfig config = {
 	.palette = {
@@ -44,7 +43,7 @@ static double rel_ang(double x1, double y1, double x2, double y2) {
 
 uint32_t create_colour(const Result *r) {
 	if (r->count >= MAX_ITER) {
-		return 0xFF000000; // Black
+		return 0xFF000000;
 	}
 
 	double countAccum = config.options.countOffset;
@@ -63,7 +62,6 @@ uint32_t create_colour(const Result *r) {
 	if (config.options.calcRotation) {
 		if (r->count > 1.0) countAccum += ((double)MAX_ITER / (r->count + 1.0)) * (0.5 + sin(ang) / 2.0) * config.options.coefRotation;
 	}
-
 	if (config.options.calcDisplacementXOR) {
 		if (r->count > 1.0) {
 			int xa = (int)(MAX_ITER * dzi);
@@ -75,7 +73,6 @@ uint32_t create_colour(const Result *r) {
 			countAccum += config.options.coefDisplacementXOR * (double)(xa ^ xb) / (double)MAX_ITER;
 		}
 	}
-
 	if (config.options.calcPolarCoordXOR) {
 		if (r->count > 1.0) {
 			int xa = (int)(MAX_ITER * ang);

@@ -6,8 +6,10 @@
 #include "df64.h"
 
 #define MAX_ITER 1024
-#define WINDOW_WIDTH 800
-#define WINDOW_HEIGHT 600
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 typedef struct {
 	double colourWavePeriod;
@@ -37,8 +39,6 @@ typedef struct {
 	double dz, dzi;
 } Result;
 
-extern Result g_results[];
-
 typedef struct {
 	df64 z_real[MAX_ITER + 1];
 	df64 z_imag[MAX_ITER + 1];
@@ -61,5 +61,9 @@ void compute_reference_orbit(mpf_t cx, mpf_t cy, mpf_t zoom);
 Result mandelbrot_perturbation(df64 dc_r, df64 dc_i, int max_iter);
 Result mandelbrot_calc(double c, double ci, int max_iter);
 uint32_t create_colour(const Result *r);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

@@ -4,8 +4,18 @@
 #include <SDL2/SDL.h>
 #include <gmp.h>
 #include "df64.h"
+#include "mandelbrot.h"
 
 #define STRIP_HEIGHT 64
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+extern int render_width;
+extern int render_height;
+extern Result *g_results;
+extern uint16_t *g_counts;
 
 typedef struct {
 	int active;
@@ -18,7 +28,8 @@ typedef struct {
 } RenderState;
 
 extern RenderState render_state;
-extern uint16_t g_counts[];
+
+void set_render_size(int w, int h);
 
 int compute_preview_transform(mpf_t cx, mpf_t cy, mpf_t zoom,
                               mpf_t last_cx, mpf_t last_cy, mpf_t last_zoom,
@@ -31,5 +42,9 @@ void begin_render(mpf_t cx, mpf_t cy, mpf_t zoom,
                   mpf_t last_cx, mpf_t last_cy, mpf_t last_zoom);
 int render_strip(uint32_t *pixels, SDL_Texture *tex, SDL_Renderer *ren);
 void redraw_palette(uint32_t *pixels, SDL_Texture *tex, SDL_Renderer *ren);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif
