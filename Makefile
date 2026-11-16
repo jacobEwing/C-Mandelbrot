@@ -1,7 +1,7 @@
 CC=gcc
 CXX=g++
-CFLAGS=-Wall -O3 -march=native -fopenmp
-CXXFLAGS=-Wall -O3 -march=native -fopenmp -Iimgui -Iimgui/backends $(shell sdl2-config --cflags)
+CFLAGS=-Wall -O3 -march=native -fopenmp -Icjson
+CXXFLAGS=-Wall -O3 -march=native -fopenmp -Iimgui -Iimgui/backends -Icjson $(shell sdl2-config --cflags)
 LIBS=-lSDL2 -lgmp -lm
 
 IMGUI_SRCS = imgui/imgui.cpp \
@@ -15,10 +15,10 @@ IMGUI_OBJS = $(IMGUI_SRCS:.cpp=.o)
 
 all: mandelbrot
 
-mandelbrot: main.o mandelbrot.o renderer.o $(IMGUI_OBJS)
-	$(CXX) $(CXXFLAGS) main.o mandelbrot.o renderer.o $(IMGUI_OBJS) -o mandelbrot $(LIBS)
+mandelbrot: main.o mandelbrot.o renderer.o state.o cjson/cJSON.o $(IMGUI_OBJS)
+	$(CXX) $(CXXFLAGS) main.o mandelbrot.o renderer.o state.o cjson/cJSON.o $(IMGUI_OBJS) -o mandelbrot $(LIBS)
 
-main.o: main.cpp renderer.h mandelbrot.h
+main.o: main.cpp renderer.h mandelbrot.h state.h
 	$(CXX) $(CXXFLAGS) -c main.cpp -o main.o
 
 mandelbrot.o: mandelbrot.c mandelbrot.h df64.h
@@ -27,9 +27,15 @@ mandelbrot.o: mandelbrot.c mandelbrot.h df64.h
 renderer.o: renderer.c renderer.h mandelbrot.h df64.h
 	$(CC) $(CFLAGS) -c renderer.c -o renderer.o
 
+state.o: state.c state.h mandelbrot.h cjson/cJSON.h
+	$(CC) $(CFLAGS) -c state.c -o state.o
+
+cjson/cJSON.o: cjson/cJSON.c cjson/cJSON.h
+	$(CC) $(CFLAGS) -c cjson/cJSON.c -o cjson/cJSON.o
+
 imgui/%.o: imgui/%.cpp
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 clean:
 	rm -f *.o mandelbrot
-	rm -f imgui/*.o imgui/backends/*.o
+	rm -f imgui/*.o imgui/backends/*.o cjson/*.o

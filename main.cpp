@@ -11,6 +11,7 @@
 #include "imgui_impl_sdl2.h"
 #include "imgui_impl_sdlrenderer2.h"
 
+#include "state.h"
 #include "renderer.h"
 #include "mandelbrot.h"
 
@@ -25,6 +26,55 @@ typedef struct {
 
 static void mpf_to_str(mpf_t x, char* buffer, size_t size) {
 	gmp_snprintf(buffer, size, "%.18Ff", x);
+}
+
+static void sync_ui_from_config(
+	int& ui_max_iter, float& ui_max_radius, int& ui_recursion, double& ui_count_offset, int& ui_end_condition,
+	bool& ui_calc_iter, bool& ui_calc_disp, bool& ui_calc_rot, bool& ui_calc_xor_disp, bool& ui_calc_xor_polar,
+	float& ui_master_offset, float& ui_red_offset, float& ui_green_offset, float& ui_blue_offset,
+	float& ui_master_stagger, float& ui_red_stagger, float& ui_green_stagger, float& ui_blue_stagger,
+	double& ui_wave_period, double& ui_red_period, double& ui_green_period, double& ui_blue_period,
+	bool& ui_stagger_before, bool& ui_stagger_after,
+	char* ui_mask_red, char* ui_mask_green, char* ui_mask_blue)
+{
+	ui_max_iter = config.options.max_iter;
+	ui_max_radius = config.options.maxRadius;
+	ui_recursion = config.options.recursionDepth;
+	ui_count_offset = config.options.countOffset;
+	ui_end_condition = config.options.endCondition;
+
+	ui_calc_iter = config.options.calcIterations != 0;
+	ui_calc_disp = config.options.calcDisplacement != 0;
+	ui_calc_rot = config.options.calcRotation != 0;
+	ui_calc_xor_disp = config.options.calcDisplacementXOR != 0;
+	ui_calc_xor_polar = config.options.calcPolarCoordXOR != 0;
+
+	ui_master_offset = config.palette.masterOffset;
+	ui_red_offset = config.palette.redOffset;
+	ui_green_offset = config.palette.greenOffset;
+	ui_blue_offset = config.palette.blueOffset;
+
+	ui_master_stagger = config.palette.masterStagger;
+	ui_red_stagger = config.palette.redStagger;
+	ui_green_stagger = config.palette.greenStagger;
+	ui_blue_stagger = config.palette.blueStagger;
+
+	ui_wave_period = config.palette.colourWavePeriod;
+	ui_red_period = config.palette.redPeriod;
+	ui_green_period = config.palette.greenPeriod;
+	ui_blue_period = config.palette.bluePeriod;
+
+	ui_stagger_before = config.palette.staggerBefore != 0;
+	ui_stagger_after = config.palette.staggerAfter != 0;
+
+	auto int_to_bin = [](int val, int len, char* buf) {
+		if (len <= 0) { buf[0] = '0'; buf[1] = '\0'; return; }
+		for (int i = 0; i < len; i++) buf[i] = (val & (1 << (len - 1 - i))) ? '1' : '0';
+		buf[len] = '\0';
+	};
+	int_to_bin(config.palette.staggerMaskRed, config.palette.staggerMaskRedLen, ui_mask_red);
+	int_to_bin(config.palette.staggerMaskGreen, config.palette.staggerMaskGreenLen, ui_mask_green);
+	int_to_bin(config.palette.staggerMaskBlue, config.palette.staggerMaskBlueLen, ui_mask_blue);
 }
 
 static bool InputIntWheel(const char* label, int* v, int step = 1) {
@@ -168,6 +218,14 @@ int main(int argc, char *argv[]) {
 
 	bool palette_changed = false;
 
+	char state_filename[256] = "state.json";
+	bool state_loaded_msg = false;
+	bool state_saved_msg = false;
+	bool state_url_msg = false;
+	Uint32 msg_time = 0;
+
+	bool load_success = false;
+
 	while (running) {
 		SDL_Event e;
 		while (SDL_PollEvent(&e)) {
@@ -310,6 +368,60 @@ int main(int argc, char *argv[]) {
 		bool geometry_changed = false;
 		bool colour_changed = false;
 		bool modifiers_changed = false;
+
+
+		ImGui::Separator();
+		ImGui::Text("State Management");
+		ImGui::InputText("File", state_filename, sizeof(state_filename));
+		if (ImGui::Button("Save State")) {
+			if (save_state(state_filename, view.cx, view.cy, view.zoom)) {
+				state_saved_msg = true; state_loaded_msg = false; state_url_msg = false;
+				msg_time = SDL_GetTicks();
+			}
+		}
+		ImGui::SameLine();
+		if (ImGui::Button("Load State")) {
+			if (load_state(state_filename, view.cx, view.cy, view.zoom)) {
+				state_loaded_msg = true; state_saved_msg = false; state_url_msg = false;
+				msg_time = SDL_GetTicks();
+				load_success = true;
+			}
+		}
+		ImGui::SameLine();
+		if (ImGui::Button("Copy URL for Web")) {
+			char* url = get_state_url(view.cx, view.cy, view.zoom);
+			if (url) {
+				SDL_SetClipboardText(url);
+				free(url);
+				state_url_msg = true; state_saved_msg = false; state_loaded_msg = false;
+				msg_time = SDL_GetTicks();
+			}
+		}
+
+		if (state_loaded_msg && (SDL_GetTicks() - msg_time < 3000))
+			ImGui::TextColored(ImVec4(0, 1, 0, 1), "State loaded!");
+		else if (state_saved_msg && (SDL_GetTicks() - msg_time < 3000))
+			ImGui::TextColored(ImVec4(0, 1, 0, 1), "State saved!");
+		else if (state_url_msg && (SDL_GetTicks() - msg_time < 3000))
+			ImGui::TextColored(ImVec4(0, 1, 0, 1), "URL copied to clipboard!");
+
+		if (load_success) {
+			sync_ui_from_config(
+				ui_max_iter, ui_max_radius, ui_recursion, ui_count_offset, ui_end_condition,
+				ui_calc_iter, ui_calc_disp, ui_calc_rot, ui_calc_xor_disp, ui_calc_xor_polar,
+				ui_master_offset, ui_red_offset, ui_green_offset, ui_blue_offset,
+				ui_master_stagger, ui_red_stagger, ui_green_stagger, ui_blue_stagger,
+				ui_wave_period, ui_red_period, ui_green_period, ui_blue_period,
+				ui_stagger_before, ui_stagger_after,
+				ui_mask_red, ui_mask_green, ui_mask_blue);
+
+			// Force a fresh render from the new view
+			have_last_render = 0;
+			pending_render = 1;
+			last_wheel_time = SDL_GetTicks();
+			if (render_state.active) abort_render = 1;
+			load_success = false;
+		}
 
 		ImGui::Separator();
 		ImGui::Text("Fractal Parameters");
