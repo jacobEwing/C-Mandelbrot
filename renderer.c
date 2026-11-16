@@ -240,7 +240,7 @@ int render_strip(uint32_t *pixels, SDL_Texture *tex, SDL_Renderer *ren) {
 			int in_set = 0, near_ref = 0, other = 0;
 			for (int i = 0; i < render_width * render_height; i++) {
 				int c = g_counts[i];
-				if (c >= config.options.max_iter) in_set++;
+				if (c >= config.options.max_iter * config.options.recursionDepth) in_set++;
 				else if (abs(c - ref.escape_iteration) < 10) near_ref++;
 				else other++;
 			}
@@ -254,7 +254,7 @@ int render_strip(uint32_t *pixels, SDL_Texture *tex, SDL_Renderer *ren) {
 	return 0;
 }
 
-void redraw_palette(uint32_t *pixels, SDL_Texture *tex, SDL_Renderer *ren) {
+void redraw_palette(uint32_t *pixels, uint32_t *last_pixels, SDL_Texture *tex, SDL_Texture *preview_tex, SDL_Renderer *ren) {
 	for (int y = 0; y < render_height; y++) {
 		for (int x = 0; x < render_width; x++) {
 			int idx = y * render_width + x;
@@ -262,4 +262,7 @@ void redraw_palette(uint32_t *pixels, SDL_Texture *tex, SDL_Renderer *ren) {
 		}
 	}
 	SDL_UpdateTexture(tex, NULL, pixels, render_width * sizeof(uint32_t));
+	
+	memcpy(last_pixels, pixels, (size_t)render_width * render_height * sizeof(uint32_t));
+	SDL_UpdateTexture(preview_tex, NULL, last_pixels, render_width * sizeof(uint32_t));
 }

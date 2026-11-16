@@ -4,7 +4,7 @@
 #include <stdint.h>
 #include <math.h>
 
-ReferenceOrbit ref;
+ReferenceOrbit ref = {0};
 
 RenderConfig config = {
 	.palette = {
@@ -123,95 +123,6 @@ uint32_t create_colour(const Result *r) {
 	return (255 << 24) | (r_val << 16) | (g_val << 8) | b_val;
 }
 
-typedef struct {
-	int count;
-	df64 z, zi;
-	df64 dz, dzi;
-} ResultDf64;
-
-static ResultDf64 mandelbrot_calc_df64_inner(df64 c, df64 ci, int accuracy, int recursion_depth) {
-	df64 zr = {0.0, 0.0}, zi = {0.0, 0.0};
-	df64 zsq = {0.0, 0.0}, zisq = {0.0, 0.0};
-	df64 maxr = df_from_double(config.options.maxRadius);
-	int i = 0;
-
-	switch (config.options.endCondition) {
-		case 1: /* multiplication */
-			while (i < accuracy && df_lt(df_mul(zsq, zisq), maxr)) {
-				zi = df_add(df_mul_d(df_mul(zr, zi), 2.0), ci);
-				zr = df_add(df_sub(zsq, zisq), c);
-				zsq = df_mul(zr, zr);
-				zisq = df_mul(zi, zi);
-				i++;
-			}
-			break;
-		case 2: /* subtraction */
-			while (i < accuracy && df_lt(df_abs(df_sub(zsq, zisq)), maxr)) {
-				zi = df_add(df_mul_d(df_mul(zr, zi), 2.0), ci);
-				zr = df_add(df_sub(zsq, zisq), c);
-				zsq = df_mul(zr, zr);
-				zisq = df_mul(zi, zi);
-				i++;
-			}
-			break;
-		case 3: /* fluffy cloud */
-			while (i < accuracy && df_lt(df_add(df_abs(zr), df_abs(zi)), maxr)) {
-				zi = df_add(df_mul_d(df_mul(zr, zi), 2.0), ci);
-				zr = df_add(df_sub(zsq, zisq), c);
-				zsq = df_mul(zr, zr);
-				zisq = df_mul(zi, zi);
-				i++;
-			}
-			break;
-		case 4: /* foliage */
-			while (i < accuracy && df_lt(df_abs(df_sub(df_abs(zr), df_abs(zi))), maxr)) {
-				zi = df_add(df_mul_d(df_mul(zr, zi), 2.0), ci);
-				zr = df_add(df_sub(zsq, zisq), c);
-				zsq = df_mul(zr, zr);
-				zisq = df_mul(zi, zi);
-				i++;
-			}
-			break;
-		default: /* addition */
-			while (i < accuracy && df_lt(df_add(zsq, zisq), maxr)) {
-				zi = df_add(df_mul_d(df_mul(zr, zi), 2.0), ci);
-				zr = df_add(df_sub(zsq, zisq), c);
-				zsq = df_mul(zr, zr);
-				zisq = df_mul(zi, zi);
-				i++;
-			}
-	}
-
-	ResultDf64 res;
-	res.count = i;
-	res.z = zr;
-	res.zi = zi;
-	res.dz = df_sub(zr, c);
-	res.dzi = df_sub(zi, ci);
-
-	if (recursion_depth > 1 && !(df_eq(zr, c) && df_eq(zi, ci))) {
-		ResultDf64 r2 = mandelbrot_calc_df64_inner(res.dz, res.dzi, accuracy, recursion_depth - 1);
-		res.count += r2.count;
-		res.z = df_add(res.z, r2.z);
-		res.zi = df_add(res.zi, r2.zi);
-		res.dz = df_add(res.dz, r2.dz);
-		res.dzi = df_add(res.dzi, r2.dzi);
-	}
-
-	return res;
-}
-
-Result mandelbrot_calc_df64(df64 c, df64 ci, int accuracy, int recursion_depth) {
-	ResultDf64 r = mandelbrot_calc_df64_inner(c, ci, accuracy, recursion_depth);
-	Result out;
-	out.count = r.count;
-	out.z = df_to_double(r.z);
-	out.zi = df_to_double(r.zi);
-	out.dz = df_to_double(r.dz);
-	out.dzi = df_to_double(r.dzi);
-	return out;
-}
-
 df64 mpf_to_df64(mpf_t x) {
 	double hi = mpf_get_d(x);
 	mpf_t diff;
@@ -290,6 +201,16 @@ static void compute_orbit_gmp(mpf_t Cx, mpf_t Cy) {
 }
 
 void compute_reference_orbit(mpf_t cx, mpf_t cy, mpf_t zoom) {
+	int req_len = config.options.max_iter + 1;
+	if (ref.capacity < req_len) {
+		ref.z_real = (df64*)realloc(ref.z_real, req_len * sizeof(df64));
+		ref.z_imag = (df64*)realloc(ref.z_imag, req_len * sizeof(df64));
+		ref.zmag2 = (df64*)realloc(ref.zmag2, req_len * sizeof(df64));
+		ref.dz_real = (df64*)realloc(ref.dz_real, req_len * sizeof(df64));
+		ref.dz_imag = (df64*)realloc(ref.dz_imag, req_len * sizeof(df64));
+		ref.capacity = req_len;
+	}
+
 	compute_orbit_gmp(cx, cy);
 
 	if (ref.escaped && ref.escape_iteration < config.options.max_iter - 100) {
@@ -440,49 +361,34 @@ Result mandelbrot_calc(double c, double ci, int accuracy, int recursion_depth) {
 	double maxr = config.options.maxRadius;
 
 	switch (config.options.endCondition) {
-		case 1: /* multiplication */
+		case 1:
 			while (i < accuracy && zsq * zisq < maxr) {
-				zi = zr * zi * 2.0 + ci;
-				zr = zsq - zisq + c;
-				zsq = zr * zr;
-				zisq = zi * zi;
-				i++;
+				zi = zr * zi * 2.0 + ci; zr = zsq - zisq + c;
+				zsq = zr * zr; zisq = zi * zi; i++;
 			}
 			break;
-		case 2: /* subtraction */
+		case 2:
 			while (i < accuracy && fabs(zsq - zisq) < maxr) {
-				zi = zr * zi * 2.0 + ci;
-				zr = zsq - zisq + c;
-				zsq = zr * zr;
-				zisq = zi * zi;
-				i++;
+				zi = zr * zi * 2.0 + ci; zr = zsq - zisq + c;
+				zsq = zr * zr; zisq = zi * zi; i++;
 			}
 			break;
-		case 3: /* fluffy cloud */
+		case 3:
 			while (i < accuracy && fabs(zr) + fabs(zi) < maxr) {
-				zi = zr * zi * 2.0 + ci;
-				zr = zsq - zisq + c;
-				zsq = zr * zr;
-				zisq = zi * zi;
-				i++;
+				zi = zr * zi * 2.0 + ci; zr = zsq - zisq + c;
+				zsq = zr * zr; zisq = zi * zi; i++;
 			}
 			break;
-		case 4: /* foliage */
+		case 4:
 			while (i < accuracy && fabs(fabs(zr) - fabs(zi)) < maxr) {
-				zi = zr * zi * 2.0 + ci;
-				zr = zsq - zisq + c;
-				zsq = zr * zr;
-				zisq = zi * zi;
-				i++;
+				zi = zr * zi * 2.0 + ci; zr = zsq - zisq + c;
+				zsq = zr * zr; zisq = zi * zi; i++;
 			}
 			break;
-		default: /* 0 = addition */
+		default:
 			while (i < accuracy && zsq + zisq < maxr) {
-				zi = zr * zi * 2.0 + ci;
-				zr = zsq - zisq + c;
-				zsq = zr * zr;
-				zisq = zi * zi;
-				i++;
+				zi = zr * zi * 2.0 + ci; zr = zsq - zisq + c;
+				zsq = zr * zr; zisq = zi * zi; i++;
 			}
 	}
 
@@ -505,3 +411,76 @@ Result mandelbrot_calc(double c, double ci, int accuracy, int recursion_depth) {
 	return res;
 }
 
+typedef struct {
+	int count;
+	df64 z, zi;
+	df64 dz, dzi;
+} ResultDf64;
+
+static ResultDf64 mandelbrot_calc_df64_inner(df64 c, df64 ci, int accuracy, int recursion_depth) {
+	df64 zr = {0.0, 0.0}, zi = {0.0, 0.0};
+	df64 zsq = {0.0, 0.0}, zisq = {0.0, 0.0};
+	df64 maxr = df_from_double(config.options.maxRadius);
+	int i = 0;
+
+	switch (config.options.endCondition) {
+		case 1:
+			while (i < accuracy && df_lt(df_mul(zsq, zisq), maxr)) {
+				zi = df_add(df_mul_d(df_mul(zr, zi), 2.0), ci); zr = df_add(df_sub(zsq, zisq), c);
+				zsq = df_mul(zr, zr); zisq = df_mul(zi, zi); i++;
+			}
+			break;
+		case 2:
+			while (i < accuracy && df_lt(df_abs(df_sub(zsq, zisq)), maxr)) {
+				zi = df_add(df_mul_d(df_mul(zr, zi), 2.0), ci); zr = df_add(df_sub(zsq, zisq), c);
+				zsq = df_mul(zr, zr); zisq = df_mul(zi, zi); i++;
+			}
+			break;
+		case 3:
+			while (i < accuracy && df_lt(df_add(df_abs(zr), df_abs(zi)), maxr)) {
+				zi = df_add(df_mul_d(df_mul(zr, zi), 2.0), ci); zr = df_add(df_sub(zsq, zisq), c);
+				zsq = df_mul(zr, zr); zisq = df_mul(zi, zi); i++;
+			}
+			break;
+		case 4:
+			while (i < accuracy && df_lt(df_abs(df_sub(df_abs(zr), df_abs(zi))), maxr)) {
+				zi = df_add(df_mul_d(df_mul(zr, zi), 2.0), ci); zr = df_add(df_sub(zsq, zisq), c);
+				zsq = df_mul(zr, zr); zisq = df_mul(zi, zi); i++;
+			}
+			break;
+		default:
+			while (i < accuracy && df_lt(df_add(zsq, zisq), maxr)) {
+				zi = df_add(df_mul_d(df_mul(zr, zi), 2.0), ci); zr = df_add(df_sub(zsq, zisq), c);
+				zsq = df_mul(zr, zr); zisq = df_mul(zi, zi); i++;
+			}
+	}
+
+	ResultDf64 res;
+	res.count = i;
+	res.z = zr;
+	res.zi = zi;
+	res.dz = df_sub(zr, c);
+	res.dzi = df_sub(zi, ci);
+
+	if (recursion_depth > 1 && !(df_eq(zr, c) && df_eq(zi, ci))) {
+		ResultDf64 r2 = mandelbrot_calc_df64_inner(res.dz, res.dzi, accuracy, recursion_depth - 1);
+		res.count += r2.count;
+		res.z = df_add(res.z, r2.z);
+		res.zi = df_add(res.zi, r2.zi);
+		res.dz = df_add(res.dz, r2.dz);
+		res.dzi = df_add(res.dzi, r2.dzi);
+	}
+
+	return res;
+}
+
+Result mandelbrot_calc_df64(df64 c, df64 ci, int accuracy, int recursion_depth) {
+	ResultDf64 r = mandelbrot_calc_df64_inner(c, ci, accuracy, recursion_depth);
+	Result out;
+	out.count = r.count;
+	out.z = df_to_double(r.z);
+	out.zi = df_to_double(r.zi);
+	out.dz = df_to_double(r.dz);
+	out.dzi = df_to_double(r.dzi);
+	return out;
+}

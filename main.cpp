@@ -27,58 +27,21 @@ static void mpf_to_str(mpf_t x, char* buffer, size_t size) {
 	gmp_snprintf(buffer, size, "%.18Ff", x);
 }
 
-static bool RateSlider(const char* label, double* value, double max_rate, const char* format = "%.3f") {
-	ImGui::PushID(label);
-	ImGui::Text("%s", label);
-
-	ImVec2 p0 = ImGui::GetCursorScreenPos();
-	float width = ImGui::GetContentRegionAvail().x;
-	if (width < 100.0f) width = 100.0f;
-	float height = 24.0f;
-	ImVec2 p1 = ImVec2(p0.x + width, p0.y + height);
-
-	ImGui::InvisibleButton("##slider", ImVec2(width, height));
-	bool held = ImGui::IsItemActive();
-	bool changed = false;
-
-	ImDrawList* dl = ImGui::GetWindowDrawList();
-	dl->AddRectFilled(p0, p1, IM_COL32(30, 30, 30, 255), 4.0f);
-	dl->AddRect(p0, p1, IM_COL32(80, 80, 80, 255), 4.0f);
-
-	float center_x = p0.x + width * 0.5f;
-	float handle_x = center_x;
-
-	if (held) {
-		float offset = ImGui::GetIO().MousePos.x - center_x;
-		float half = width * 0.5f;
-		float normalized = offset / half;
-		if (normalized > 1.0f) normalized = 1.0f;
-		if (normalized < -1.0f) normalized = -1.0f;
-		handle_x = center_x + normalized * half;
-
-		double dt = ImGui::GetIO().DeltaTime;
-		if (dt > 0.1) dt = 0.1;
-		*value += normalized * max_rate * dt;
+static bool InputIntWheel(const char* label, int* v, int step = 1) {
+	bool changed = ImGui::InputInt(label, v, step, step * 10);
+	if (ImGui::IsItemHovered() && ImGui::GetIO().MouseWheel != 0.0f) {
+		*v += (int)(ImGui::GetIO().MouseWheel * step);
 		changed = true;
 	}
+	return changed;
+}
 
-	dl->AddLine(ImVec2(center_x, p0.y + 2), ImVec2(center_x, p1.y - 2), IM_COL32(100, 100, 100, 200), 1.0f);
-
-	if (held && handle_x != center_x) {
-		ImU32 color = (handle_x > center_x) ? IM_COL32(100, 200, 100, 100) : IM_COL32(200, 100, 100, 100);
-		float left = (handle_x < center_x) ? handle_x : center_x;
-		float right = (handle_x < center_x) ? center_x : handle_x;
-		dl->AddRectFilled(ImVec2(left, p0.y + 4), ImVec2(right, p1.y - 4), color, 2.0f);
+static bool InputDoubleWheel(const char* label, double* v, double step = 0.01, double step_fast = 0.1) {
+	bool changed = ImGui::InputDouble(label, v, step, step_fast, "%.6f");
+	if (ImGui::IsItemHovered() && ImGui::GetIO().MouseWheel != 0.0f) {
+		*v += ImGui::GetIO().MouseWheel * step;
+		changed = true;
 	}
-
-	dl->AddRectFilled(ImVec2(handle_x - 3, p0.y + 2), ImVec2(handle_x + 3, p1.y - 2),
-	                  IM_COL32(242, 192, 94, 255), 2.0f);
-
-	char buf[64];
-	snprintf(buf, sizeof(buf), format, *value);
-	dl->AddText(ImVec2(p0.x + 8, p0.y + 5), IM_COL32(220, 220, 220, 255), buf);
-
-	ImGui::PopID();
 	return changed;
 }
 
@@ -88,27 +51,54 @@ int main(int argc, char *argv[]) {
 		return 1;
 	}
 
-	SDL_Window *win = SDL_CreateWindow("Mandelbrot Native", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, render_width, render_height, SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE);
-	SDL_Renderer *ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_ACCELERATED);
-	if (!ren) ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_SOFTWARE);
+	// --- Render window (fractal only) ---
+	SDL_Window *render_win = SDL_CreateWindow(
+		"Mandelbrot Render",
+		SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+		render_width, render_height,
+		SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE);
+	if (!render_win) {
+		fprintf(stderr, "SDL_CreateWindow(render) Error: %s\n", SDL_GetError());
+		return 1;
+	}
+	SDL_Renderer *render_ren = SDL_CreateRenderer(render_win, -1, SDL_RENDERER_ACCELERATED);
+	if (!render_ren) render_ren = SDL_CreateRenderer(render_win, -1, SDL_RENDERER_SOFTWARE);
 
 	int actual_w = render_width, actual_h = render_height;
-	SDL_GetWindowSize(win, &actual_w, &actual_h);
+	SDL_GetWindowSize(render_win, &actual_w, &actual_h);
 	set_render_size(actual_w > 0 ? actual_w : 800, actual_h > 0 ? actual_h : 600);
 
-	SDL_Texture *tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, render_width, render_height);
-	SDL_Texture *preview_tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, render_width, render_height);
+	SDL_Texture *tex = SDL_CreateTexture(render_ren, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, render_width, render_height);
+	SDL_Texture *preview_tex = SDL_CreateTexture(render_ren, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, render_width, render_height);
 	uint32_t *pixels = (uint32_t*)calloc((size_t)render_width * render_height, sizeof(uint32_t));
 	uint32_t *last_pixels = (uint32_t*)calloc((size_t)render_width * render_height, sizeof(uint32_t));
 
 	SDL_UpdateTexture(preview_tex, NULL, last_pixels, render_width * sizeof(uint32_t));
 
+	// --- UI window (ImGui controls only) ---
+	int fx, fy;
+	SDL_GetWindowPosition(render_win, &fx, &fy);
+	SDL_Window *ui_win = SDL_CreateWindow(
+		"Mandelbrot Controls",
+		fx + actual_w + 20, fy,
+		400, 640,
+		SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE);
+	if (!ui_win) {
+		fprintf(stderr, "SDL_CreateWindow(ui) Error: %s\n", SDL_GetError());
+		return 1;
+	}
+	SDL_Renderer *ui_ren = SDL_CreateRenderer(ui_win, -1, SDL_RENDERER_ACCELERATED);
+	if (!ui_ren) ui_ren = SDL_CreateRenderer(ui_win, -1, SDL_RENDERER_SOFTWARE);
+
 	IMGUI_CHECKVERSION();
 	ImGui::CreateContext();
 	ImGuiIO& io = ImGui::GetIO(); (void)io;
 	ImGui::StyleColorsDark();
-	ImGui_ImplSDL2_InitForSDLRenderer(win, ren);
-	ImGui_ImplSDLRenderer2_Init(ren);
+	ImGui_ImplSDL2_InitForSDLRenderer(ui_win, ui_ren);
+	ImGui_ImplSDLRenderer2_Init(ui_ren);
+
+	Uint32 render_win_id = SDL_GetWindowID(render_win);
+	Uint32 ui_win_id = SDL_GetWindowID(ui_win);
 
 	ViewState view;
 	mpf_init2(view.cx, 256);
@@ -144,7 +134,6 @@ int main(int argc, char *argv[]) {
 	int resize_new_w = render_width, resize_new_h = render_height;
 	Uint32 last_resize_time = 0;
 
-	// UI state variables
 	int ui_max_iter = config.options.max_iter;
 	float ui_max_radius = config.options.maxRadius;
 	int ui_recursion = config.options.recursionDepth;
@@ -165,7 +154,7 @@ int main(int argc, char *argv[]) {
 	float ui_red_stagger = config.palette.redStagger;
 	float ui_green_stagger = config.palette.greenStagger;
 	float ui_blue_stagger = config.palette.blueStagger;
-	
+
 	double ui_wave_period = config.palette.colourWavePeriod;
 	double ui_red_period = config.palette.redPeriod;
 	double ui_green_period = config.palette.greenPeriod;
@@ -173,7 +162,7 @@ int main(int argc, char *argv[]) {
 
 	bool ui_stagger_before = config.palette.staggerBefore;
 	bool ui_stagger_after = config.palette.staggerAfter;
-	char ui_mask_red[32] = "10"; 
+	char ui_mask_red[32] = "10";
 	char ui_mask_green[32] = "10";
 	char ui_mask_blue[32] = "10";
 
@@ -182,19 +171,47 @@ int main(int argc, char *argv[]) {
 	while (running) {
 		SDL_Event e;
 		while (SDL_PollEvent(&e)) {
-			ImGui_ImplSDL2_ProcessEvent(&e);
-			if (e.type == SDL_QUIT) running = 0;
-			if (e.type == SDL_WINDOWEVENT) {
-				if (e.window.event == SDL_WINDOWEVENT_CLOSE && e.window.windowID == SDL_GetWindowID(win)) running = 0;
-				else if (e.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {
+			if (e.type == SDL_QUIT) { running = 0; break; }
+
+			Uint32 evt_win = 0;
+			switch (e.type) {
+				case SDL_WINDOWEVENT: evt_win = e.window.windowID; break;
+				case SDL_MOUSEBUTTONDOWN: case SDL_MOUSEBUTTONUP: evt_win = e.button.windowID; break;
+				case SDL_MOUSEMOTION: evt_win = e.motion.windowID; break;
+				case SDL_MOUSEWHEEL: evt_win = e.wheel.windowID; break;
+				case SDL_KEYDOWN: case SDL_KEYUP: evt_win = e.key.windowID; break;
+				case SDL_TEXTINPUT: evt_win = e.text.windowID; break;
+				default: break;
+			}
+
+			if (evt_win == ui_win_id) {
+				ImGui_ImplSDL2_ProcessEvent(&e);
+			}
+
+			if (e.type == SDL_WINDOWEVENT && e.window.event == SDL_WINDOWEVENT_CLOSE) {
+				running = 0;
+				break;
+			}
+
+			if (evt_win == render_win_id) {
+				if (e.type == SDL_WINDOWEVENT && e.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {
 					int nw = e.window.data1, nh = e.window.data2;
 					if (nw > 0 && nh > 0) {
 						resize_new_w = nw; resize_new_h = nh;
 						pending_resize = 1; last_resize_time = SDL_GetTicks();
 					}
 				}
-			}
-			if (!io.WantCaptureMouse) {
+				if (e.type == SDL_KEYDOWN && e.key.keysym.scancode == SDL_SCANCODE_F11) {
+					Uint32 flags = SDL_GetWindowFlags(render_win);
+					if ((flags & SDL_WINDOW_FULLSCREEN_DESKTOP) == SDL_WINDOW_FULLSCREEN_DESKTOP) {
+						SDL_SetWindowFullscreen(render_win, 0);
+					} else {
+						SDL_SetWindowFullscreen(render_win, SDL_WINDOW_FULLSCREEN_DESKTOP);
+					}
+				}
+				if (e.type == SDL_KEYDOWN && e.key.keysym.scancode == SDL_SCANCODE_P) {
+					gmp_printf("--cx=%.80Ff --cy=%.80Ff --zoom=%.80Ff\n", view.cx, view.cy, view.zoom);
+				}
 				if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_LEFT) {
 					dragging = 1;
 					drag_start_mx = (double)e.button.x; drag_start_my = (double)e.button.y;
@@ -234,24 +251,21 @@ int main(int argc, char *argv[]) {
 				} else if (e.type == SDL_MOUSEWHEEL) {
 					int mx_raw, my_raw; SDL_GetMouseState(&mx_raw, &my_raw);
 					double mx = (double)mx_raw, my = (double)my_raw;
-					mpf_t scale, dx, dy, temp, fx, fy;
+					mpf_t scale, dx, dy, temp, fx2, fy2;
 					mpf_init2(scale, 256); mpf_init2(dx, 256); mpf_init2(dy, 256);
-					mpf_init2(temp, 256); mpf_init2(fx, 256); mpf_init2(fy, 256);
+					mpf_init2(temp, 256); mpf_init2(fx2, 256); mpf_init2(fy2, 256);
 					mpf_div_ui(scale, view.zoom, render_width);
-					mpf_set_d(temp, mx - render_width / 2.0); mpf_mul(dx, temp, scale); mpf_add(fx, view.cx, dx);
-					mpf_set_d(temp, my - render_height / 2.0); mpf_mul(dy, temp, scale); mpf_add(fy, view.cy, dy);
+					mpf_set_d(temp, mx - render_width / 2.0); mpf_mul(dx, temp, scale); mpf_add(fx2, view.cx, dx);
+					mpf_set_d(temp, my - render_height / 2.0); mpf_mul(dy, temp, scale); mpf_add(fy2, view.cy, dy);
 					if (e.wheel.y > 0) { mpf_mul_ui(view.zoom, view.zoom, 9); mpf_div_ui(view.zoom, view.zoom, 10); }
 					else if (e.wheel.y < 0) { mpf_mul_ui(view.zoom, view.zoom, 10); mpf_div_ui(view.zoom, view.zoom, 9); }
 					mpf_div_ui(scale, view.zoom, render_width);
-					mpf_set_d(temp, mx - render_width / 2.0); mpf_mul(dx, temp, scale); mpf_sub(view.cx, fx, dx);
-					mpf_set_d(temp, my - render_height / 2.0); mpf_mul(dy, temp, scale); mpf_sub(view.cy, fy, dy);
-					mpf_clear(scale); mpf_clear(dx); mpf_clear(dy); mpf_clear(temp); mpf_clear(fx); mpf_clear(fy);
+					mpf_set_d(temp, mx - render_width / 2.0); mpf_mul(dx, temp, scale); mpf_sub(view.cx, fx2, dx);
+					mpf_set_d(temp, my - render_height / 2.0); mpf_mul(dy, temp, scale); mpf_sub(view.cy, fy2, dy);
+					mpf_clear(scale); mpf_clear(dx); mpf_clear(dy); mpf_clear(temp); mpf_clear(fx2); mpf_clear(fy2);
 					pending_render = 1; last_wheel_time = SDL_GetTicks();
 					if (render_state.active) abort_render = 1;
 				}
-			}
-			if (!io.WantCaptureKeyboard && e.type == SDL_KEYDOWN && e.key.keysym.scancode == SDL_SCANCODE_P) {
-				gmp_printf("--cx=%.80Ff --cy=%.80Ff --zoom=%.80Ff\n", view.cx, view.cy, view.zoom);
 			}
 		}
 
@@ -268,19 +282,25 @@ int main(int argc, char *argv[]) {
 				set_render_size(resize_new_w, resize_new_h);
 				free(pixels); pixels = (uint32_t*)calloc((size_t)render_width * render_height, sizeof(uint32_t));
 				free(last_pixels); last_pixels = (uint32_t*)calloc((size_t)render_width * render_height, sizeof(uint32_t));
-				SDL_DestroyTexture(tex); tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, render_width, render_height);
-				SDL_DestroyTexture(preview_tex); preview_tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, render_width, render_height);
+				SDL_DestroyTexture(tex); tex = SDL_CreateTexture(render_ren, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, render_width, render_height);
+				SDL_DestroyTexture(preview_tex); preview_tex = SDL_CreateTexture(render_ren, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, render_width, render_height);
 				have_last_render = 0; pending_render = 1; last_wheel_time = SDL_GetTicks() - WHEEL_DEBOUNCE_MS - 1;
 			}
 		}
 
+		// --- ImGui frame ---
 		ImGui_ImplSDLRenderer2_NewFrame();
 		ImGui_ImplSDL2_NewFrame();
 		ImGui::NewFrame();
 
-		ImGui::SetNextWindowPos(ImVec2(10, 10), ImGuiCond_FirstUseEver);
-		ImGui::SetNextWindowSize(ImVec2(340, 600), ImGuiCond_FirstUseEver);
-		ImGui::Begin("Mandelbrot Controls", nullptr, ImGuiWindowFlags_AlwaysAutoResize);
+		ImGui::SetNextWindowPos(ImVec2(0, 0), ImGuiCond_Always);
+		ImGui::SetNextWindowSize(io.DisplaySize, ImGuiCond_Always);
+		ImGui::Begin("Mandelbrot Controls", nullptr,
+			ImGuiWindowFlags_NoTitleBar |
+			ImGuiWindowFlags_NoResize |
+			ImGuiWindowFlags_NoMove |
+			ImGuiWindowFlags_NoCollapse |
+			ImGuiWindowFlags_NoBringToFrontOnFocus);
 
 		char buf[128];
 		mpf_to_str(view.cx, buf, sizeof(buf)); ImGui::Text("Center X: %s", buf);
@@ -294,16 +314,20 @@ int main(int argc, char *argv[]) {
 		ImGui::Separator();
 		ImGui::Text("Fractal Parameters");
 
-		if (ImGui::SliderInt("Iterations##maxiter", &ui_max_iter, 100, MAX_ITER_CAP)) { geometry_changed = true; }
+		if (InputIntWheel("Iterations##maxiter", &ui_max_iter, 10)) {
+			if (ui_max_iter < 100) ui_max_iter = 100;
+			geometry_changed = true;
+		}
 		ImGui::SameLine();
-		if (ImGui::Button("×2")) { ui_max_iter = std::min(ui_max_iter * 2, MAX_ITER_CAP); geometry_changed = true; }
+		if (ImGui::Button("×2")) { ui_max_iter *= 2; geometry_changed = true; }
 		ImGui::SameLine();
-		if (ImGui::Button("÷2")) { ui_max_iter = std::max(ui_max_iter / 2, 1); geometry_changed = true; }
+		if (ImGui::Button("÷2")) { ui_max_iter /= 2; if (ui_max_iter < 1) ui_max_iter = 1; geometry_changed = true; }
 
 		if (ImGui::SliderFloat("Max Radius", &ui_max_radius, 2.0f, 100.0f)) { geometry_changed = true; }
 		if (ImGui::SliderInt("Recursion", &ui_recursion, 1, 10)) { geometry_changed = true; }
-		if (RateSlider("Count Offset", &ui_count_offset, 20.0)) { colour_changed = true; }
-		
+
+		if (InputDoubleWheel("Count Offset", &ui_count_offset, 0.1, 1.0)) { colour_changed = true; }
+
 		const char* conditions[] = { "Addition", "Multiplication", "Subtraction", "Fluffy Cloud", "Foliage" };
 		if (ImGui::Combo("End Condition", &ui_end_condition, conditions, IM_ARRAYSIZE(conditions))) { geometry_changed = true; }
 
@@ -317,22 +341,22 @@ int main(int argc, char *argv[]) {
 		}
 		if (colour_changed) {
 			config.options.countOffset = ui_count_offset;
-			if (have_last_render) redraw_palette(pixels, tex, ren);
+			if (have_last_render) redraw_palette(pixels, last_pixels, tex, preview_tex, render_ren);
 		}
 
 		ImGui::Separator();
 		ImGui::Text("Calculation Modifiers");
 
 		if (ImGui::Checkbox("Iterations##calciter", &ui_calc_iter)) modifiers_changed = true;
-		ImGui::SameLine(); if (ImGui::InputDouble("Coef##iter", &config.options.coefIterations)) modifiers_changed = true;
+		ImGui::SameLine(); if (InputDoubleWheel("Coef##iter", &config.options.coefIterations, 0.01, 0.1)) modifiers_changed = true;
 		if (ImGui::Checkbox("Displacement", &ui_calc_disp)) modifiers_changed = true;
-		ImGui::SameLine(); if (ImGui::InputDouble("Coef##disp", &config.options.coefDisplacement)) modifiers_changed = true;
+		ImGui::SameLine(); if (InputDoubleWheel("Coef##disp", &config.options.coefDisplacement, 0.01, 0.1)) modifiers_changed = true;
 		if (ImGui::Checkbox("Rotation", &ui_calc_rot)) modifiers_changed = true;
-		ImGui::SameLine(); if (ImGui::InputDouble("Coef##rot", &config.options.coefRotation)) modifiers_changed = true;
+		ImGui::SameLine(); if (InputDoubleWheel("Coef##rot", &config.options.coefRotation, 0.01, 0.1)) modifiers_changed = true;
 		if (ImGui::Checkbox("XOR Disp", &ui_calc_xor_disp)) modifiers_changed = true;
-		ImGui::SameLine(); if (ImGui::InputDouble("Coef##xor_disp", &config.options.coefDisplacementXOR)) modifiers_changed = true;
+		ImGui::SameLine(); if (InputDoubleWheel("Coef##xor_disp", &config.options.coefDisplacementXOR, 0.01, 0.1)) modifiers_changed = true;
 		if (ImGui::Checkbox("XOR Polar", &ui_calc_xor_polar)) modifiers_changed = true;
-		ImGui::SameLine(); if (ImGui::InputDouble("Coef##xor_polar", &config.options.coefPolarCoordXOR)) modifiers_changed = true;
+		ImGui::SameLine(); if (InputDoubleWheel("Coef##xor_polar", &config.options.coefPolarCoordXOR, 0.01, 0.1)) modifiers_changed = true;
 
 		if (modifiers_changed) {
 			config.options.calcIterations = ui_calc_iter ? 1 : 0;
@@ -340,12 +364,12 @@ int main(int argc, char *argv[]) {
 			config.options.calcRotation = ui_calc_rot ? 1 : 0;
 			config.options.calcDisplacementXOR = ui_calc_xor_disp ? 1 : 0;
 			config.options.calcPolarCoordXOR = ui_calc_xor_polar ? 1 : 0;
-			if (have_last_render) redraw_palette(pixels, tex, ren);
+			if (have_last_render) redraw_palette(pixels, last_pixels, tex, preview_tex, render_ren);
 		}
 
 		ImGui::Separator();
 		ImGui::Text("Palette Controls");
-		
+
 		if (ImGui::BeginTabBar("PaletteTabs")) {
 			if (ImGui::BeginTabItem("Offset")) {
 				if (ImGui::SliderFloat("Master", &ui_master_offset, -3.14f, 3.14f)) palette_changed = true;
@@ -372,12 +396,12 @@ int main(int argc, char *argv[]) {
 				ImGui::EndTabItem();
 			}
 			if (ImGui::BeginTabItem("Period")) {
-				if (RateSlider("Wave Period", &ui_wave_period, 50.0)) palette_changed = true;
+				if (InputDoubleWheel("Wave Period", &ui_wave_period, 1.0, 10.0)) palette_changed = true;
 				ImGui::Separator();
 				ImGui::Text("Multipliers:");
-				if (RateSlider("Red", &ui_red_period, 5.0)) palette_changed = true;
-				if (RateSlider("Green", &ui_green_period, 5.0)) palette_changed = true;
-				if (RateSlider("Blue", &ui_blue_period, 5.0)) palette_changed = true;
+				if (InputDoubleWheel("Red##mult", &ui_red_period, 0.1, 1.0)) palette_changed = true;
+				if (InputDoubleWheel("Green##mult", &ui_green_period, 0.1, 1.0)) palette_changed = true;
+				if (InputDoubleWheel("Blue##mult", &ui_blue_period, 0.1, 1.0)) palette_changed = true;
 				ImGui::EndTabItem();
 			}
 			ImGui::EndTabBar();
@@ -399,7 +423,6 @@ int main(int argc, char *argv[]) {
 			config.palette.staggerBefore = ui_stagger_before ? 1 : 0;
 			config.palette.staggerAfter = ui_stagger_after ? 1 : 0;
 
-			// Parse bitmask strings
 			config.palette.staggerMaskRed = (int)strtol(ui_mask_red, NULL, 2);
 			config.palette.staggerMaskRedLen = strlen(ui_mask_red) > 0 ? strlen(ui_mask_red) : 1;
 			config.palette.staggerMaskGreen = (int)strtol(ui_mask_green, NULL, 2);
@@ -407,13 +430,14 @@ int main(int argc, char *argv[]) {
 			config.palette.staggerMaskBlue = (int)strtol(ui_mask_blue, NULL, 2);
 			config.palette.staggerMaskBlueLen = strlen(ui_mask_blue) > 0 ? strlen(ui_mask_blue) : 1;
 
-			if (have_last_render) redraw_palette(pixels, tex, ren);
+			if (have_last_render) redraw_palette(pixels, last_pixels, tex, preview_tex, render_ren);
 			palette_changed = false;
 		}
 
 		ImGui::End();
 		ImGui::Render();
 
+		// --- Fractal rendering ---
 		if (render_state.active && abort_render) {
 			render_state.active = 0;
 			abort_render = 0;
@@ -422,12 +446,12 @@ int main(int argc, char *argv[]) {
 		if (!render_state.active) {
 			if (pending_render && (SDL_GetTicks() - last_wheel_time >= WHEEL_DEBOUNCE_MS)) {
 				pending_render = 0;
-				begin_render(view.cx, view.cy, view.zoom, pixels, tex, ren, last_pixels, have_last_render, last_render_cx, last_render_cy, last_render_zoom);
+				begin_render(view.cx, view.cy, view.zoom, pixels, tex, render_ren, last_pixels, have_last_render, last_render_cx, last_render_cy, last_render_zoom);
 			}
 		}
 
 		if (render_state.active) {
-			int done = render_strip(pixels, tex, ren);
+			int done = render_strip(pixels, tex, render_ren);
 			if (done) {
 				render_state.active = 0;
 				memcpy(last_pixels, pixels, (size_t)render_width * render_height * sizeof(uint32_t));
@@ -439,26 +463,29 @@ int main(int argc, char *argv[]) {
 			}
 		}
 
-		SDL_SetRenderDrawColor(ren, 0, 0, 0, 255);
-		SDL_RenderClear(ren);
-
+		// --- Present fractal window ---
+		SDL_SetRenderDrawColor(render_ren, 0, 0, 0, 255);
+		SDL_RenderClear(render_ren);
 		bool in_scrolling = pending_render && ((SDL_GetTicks() - last_wheel_time) < WHEEL_DEBOUNCE_MS) && have_last_render;
-
 		if (render_state.active || !in_scrolling) {
-			SDL_RenderCopy(ren, tex, NULL, NULL);
+			SDL_RenderCopy(render_ren, tex, NULL, NULL);
 		} else {
 			double preview_s, preview_off_x, preview_off_y;
 			if (compute_preview_transform(view.cx, view.cy, view.zoom, last_render_cx, last_render_cy, last_render_zoom, &preview_s, &preview_off_x, &preview_off_y)) {
 				SDL_Rect src = { 0, 0, render_width, render_height };
 				SDL_FRect dst = { (float)preview_off_x, (float)preview_off_y, (float)(render_width * preview_s), (float)(render_height * preview_s) };
-				SDL_RenderCopyF(ren, preview_tex, &src, &dst);
+				SDL_RenderCopyF(render_ren, preview_tex, &src, &dst);
 			} else {
-				SDL_RenderCopy(ren, tex, NULL, NULL);
+				SDL_RenderCopy(render_ren, tex, NULL, NULL);
 			}
 		}
+		SDL_RenderPresent(render_ren);
 
-		ImGui_ImplSDLRenderer2_RenderDrawData(ImGui::GetDrawData(), ren);
-		SDL_RenderPresent(ren);
+		// --- Present UI window ---
+		SDL_SetRenderDrawColor(ui_ren, 32, 32, 32, 255);
+		SDL_RenderClear(ui_ren);
+		ImGui_ImplSDLRenderer2_RenderDrawData(ImGui::GetDrawData(), ui_ren);
+		SDL_RenderPresent(ui_ren);
 
 		SDL_Delay(5);
 	}
@@ -472,6 +499,8 @@ int main(int argc, char *argv[]) {
 	mpf_clear(drag_start_cx); mpf_clear(drag_start_cy);
 	free(pixels); free(last_pixels); free(g_results); free(g_counts);
 	SDL_DestroyTexture(tex); SDL_DestroyTexture(preview_tex);
-	SDL_DestroyRenderer(ren); SDL_DestroyWindow(win); SDL_Quit();
+	SDL_DestroyRenderer(render_ren); SDL_DestroyWindow(render_win);
+	SDL_DestroyRenderer(ui_ren); SDL_DestroyWindow(ui_win);
+	SDL_Quit();
 	return 0;
 }

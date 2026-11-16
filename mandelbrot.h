@@ -5,8 +5,6 @@
 #include <gmp.h>
 #include "df64.h"
 
-#define MAX_ITER_CAP 5000
-
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -18,7 +16,6 @@ typedef struct {
 	double blueOffset, blueStagger, bluePeriod;
 	double masterOffset, masterStagger;
 	
-	// Stagger masks: parsed integer value of the binary string, and its length
 	int staggerMaskRed, staggerMaskGreen, staggerMaskBlue;
 	int staggerMaskRedLen, staggerMaskGreenLen, staggerMaskBlueLen;
 	
@@ -49,11 +46,13 @@ typedef struct {
 } Result;
 
 typedef struct {
-	df64 z_real[MAX_ITER_CAP + 1];
-	df64 z_imag[MAX_ITER_CAP + 1];
-	df64 zmag2[MAX_ITER_CAP + 1];
-	df64 dz_real[MAX_ITER_CAP + 1];
-	df64 dz_imag[MAX_ITER_CAP + 1];
+	df64* z_real;
+	df64* z_imag;
+	df64* zmag2;
+	df64* dz_real;
+	df64* dz_imag;
+	int capacity;
+	
 	int length;
 	int escaped;
 	int escape_iteration;

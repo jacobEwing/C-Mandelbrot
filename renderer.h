@@ -43,7 +43,7 @@ void begin_render(mpf_t cx, mpf_t cy, mpf_t zoom,
                   const uint32_t *last_pixels, int have_last,
                   mpf_t last_cx, mpf_t last_cy, mpf_t last_zoom);
 int render_strip(uint32_t *pixels, SDL_Texture *tex, SDL_Renderer *ren);
-void redraw_palette(uint32_t *pixels, SDL_Texture *tex, SDL_Renderer *ren);
+void redraw_palette(uint32_t *pixels, uint32_t *last_pixels, SDL_Texture *tex, SDL_Texture *preview_tex, SDL_Renderer *ren);
 
 #ifdef __cplusplus
 }
