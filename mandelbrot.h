@@ -70,6 +70,7 @@ Result mandelbrot_perturbation(df64 dc_r, df64 dc_i, int max_iter);
 Result mandelbrot_calc(double c, double ci, int accuracy, int recursion_depth);
 Result mandelbrot_calc_df64(df64 c, df64 ci, int accuracy, int recursion_depth);
 uint32_t create_colour(const Result *r);
+void reset_config(void);
 
 #ifdef __cplusplus
 }

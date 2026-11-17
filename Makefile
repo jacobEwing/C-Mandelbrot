@@ -2,7 +2,8 @@ CC=gcc
 CXX=g++
 CFLAGS=-Wall -O3 -march=native -fopenmp -Icjson
 CXXFLAGS=-Wall -O3 -march=native -fopenmp -Iimgui -Iimgui/backends -Icjson $(shell sdl2-config --cflags)
-LIBS=-lSDL2 -lgmp -lm
+LIBS=-lSDL2 -lgmp -lpng -lz -lm
+
 
 IMGUI_SRCS = imgui/imgui.cpp \
              imgui/imgui_draw.cpp \

@@ -6,7 +6,7 @@
 
 ReferenceOrbit ref = {0};
 
-RenderConfig config = {
+static const RenderConfig default_config = {
 	.palette = {
 		.colourWavePeriod = 64,
 		.redOffset = -0.47, .redStagger = 0, .redPeriod = 1,
@@ -28,6 +28,12 @@ RenderConfig config = {
 		.recursionDepth = 1
 	}
 };
+
+RenderConfig config;
+
+void reset_config(void) {
+	config = default_config;
+}
 
 static double rel_ang(double x1, double y1, double x2, double y2) {
 	double deltax = x2 - x1;

@@ -5,6 +5,8 @@
 #include <string.h>
 #include <math.h>
 #include <string>
+#include <errno.h>
+#include <fcntl.h>
 #include <gmp.h>
 
 #include "imgui.h"
@@ -24,10 +26,6 @@ typedef struct {
 	mpf_t zoom;
 } ViewState;
 
-static void mpf_to_str(mpf_t x, char* buffer, size_t size) {
-	gmp_snprintf(buffer, size, "%.18Ff", x);
-}
-
 static void sync_ui_from_config(
 	int& ui_max_iter, float& ui_max_radius, int& ui_recursion, double& ui_count_offset, int& ui_end_condition,
 	bool& ui_calc_iter, bool& ui_calc_disp, bool& ui_calc_rot, bool& ui_calc_xor_disp, bool& ui_calc_xor_polar,
@@ -42,31 +40,25 @@ static void sync_ui_from_config(
 	ui_recursion = config.options.recursionDepth;
 	ui_count_offset = config.options.countOffset;
 	ui_end_condition = config.options.endCondition;
-
 	ui_calc_iter = config.options.calcIterations != 0;
 	ui_calc_disp = config.options.calcDisplacement != 0;
 	ui_calc_rot = config.options.calcRotation != 0;
 	ui_calc_xor_disp = config.options.calcDisplacementXOR != 0;
 	ui_calc_xor_polar = config.options.calcPolarCoordXOR != 0;
-
 	ui_master_offset = config.palette.masterOffset;
 	ui_red_offset = config.palette.redOffset;
 	ui_green_offset = config.palette.greenOffset;
 	ui_blue_offset = config.palette.blueOffset;
-
 	ui_master_stagger = config.palette.masterStagger;
 	ui_red_stagger = config.palette.redStagger;
 	ui_green_stagger = config.palette.greenStagger;
 	ui_blue_stagger = config.palette.blueStagger;
-
 	ui_wave_period = config.palette.colourWavePeriod;
 	ui_red_period = config.palette.redPeriod;
 	ui_green_period = config.palette.greenPeriod;
 	ui_blue_period = config.palette.bluePeriod;
-
 	ui_stagger_before = config.palette.staggerBefore != 0;
 	ui_stagger_after = config.palette.staggerAfter != 0;
-
 	auto int_to_bin = [](int val, int len, char* buf) {
 		if (len <= 0) { buf[0] = '0'; buf[1] = '\0'; return; }
 		for (int i = 0; i < len; i++) buf[i] = (val & (1 << (len - 1 - i))) ? '1' : '0';
@@ -95,22 +87,100 @@ static bool InputDoubleWheel(const char* label, double* v, double step = 0.01, d
 	return changed;
 }
 
+static bool ModifierRow(const char* label, const char* id, bool* flag, double* coef) {
+	bool changed = false;
+	if (ImGui::Checkbox(id, flag)) changed = true;
+	ImGui::SameLine(30);
+	ImGui::TextUnformatted(label);
+	ImGui::SameLine(140);
+	ImGui::SetNextItemWidth(90);
+	std::string coef_id = std::string("##coef_") + (id + 2);
+	if (InputDoubleWheel(coef_id.c_str(), coef, 0.1, 1.0)) changed = true;
+	return changed;
+}
+
+// --- Async file dialog state ---
+typedef struct {
+	FILE* pipe;
+	bool is_save;
+} AsyncDialog;
+
+static AsyncDialog g_dialog = { NULL, false };
+
+static void start_file_dialog(bool for_save, const char* title) {
+	if (g_dialog.pipe) return;
+
+	char* save_dir = get_save_dir();
+	if (!save_dir) save_dir = strdup(".");
+	char cmd[1024];
+
+	if (for_save) {
+		snprintf(cmd, sizeof(cmd),
+			"zenity --file-selection --save --confirm-overwrite "
+			"--title='%s' --filename='%s/mandelbrot.png' 2>/dev/null",
+			title, save_dir);
+	} else {
+		snprintf(cmd, sizeof(cmd),
+			"zenity --file-selection --title='%s' "
+			"--filename='%s/mandelbrot.png' "
+			"--file-filter='Mandelbrot files (*.png, *.json) | *.png *.json' "
+			"--file-filter='All files | *' 2>/dev/null",
+			title, save_dir);
+	}
+	free(save_dir);
+
+	g_dialog.pipe = popen(cmd, "r");
+	if (g_dialog.pipe) {
+		int fd = fileno(g_dialog.pipe);
+		int flags = fcntl(fd, F_GETFL, 0);
+		fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+		g_dialog.is_save = for_save;
+	}
+}
+
+// Returns 1 if a path was obtained, 0 if still waiting, -1 if cancelled/error.
+static int poll_file_dialog(char* out_path, size_t out_size) {
+	if (!g_dialog.pipe) return 0;
+
+	char buf[1024];
+	int res = 0;
+	if (fgets(buf, sizeof(buf), g_dialog.pipe)) {
+		size_t len = strlen(buf);
+		while (len > 0 && (buf[len - 1] == '\n' || buf[len - 1] == '\r')) buf[--len] = '\0';
+		if (len > 0) {
+			snprintf(out_path, out_size, "%s", buf);
+			res = 1;
+		} else {
+			res = -1;
+		}
+	} else {
+		if (feof(g_dialog.pipe)) {
+			res = -1;
+		} else if (ferror(g_dialog.pipe)) {
+			if (errno != EAGAIN && errno != EWOULDBLOCK) res = -1;
+		}
+	}
+
+	if (res != 0) {
+		pclose(g_dialog.pipe);
+		g_dialog.pipe = NULL;
+	}
+	return res;
+}
+
 int main(int argc, char *argv[]) {
+	reset_config();
 	if (SDL_Init(SDL_INIT_VIDEO) != 0) {
 		fprintf(stderr, "SDL_Init Error: %s\n", SDL_GetError());
 		return 1;
 	}
 
-	// --- Render window (fractal only) ---
 	SDL_Window *render_win = SDL_CreateWindow(
 		"Mandelbrot Render",
 		SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
 		render_width, render_height,
 		SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE);
-	if (!render_win) {
-		fprintf(stderr, "SDL_CreateWindow(render) Error: %s\n", SDL_GetError());
-		return 1;
-	}
+	if (!render_win) { fprintf(stderr, "SDL_CreateWindow(render) Error\n"); return 1; }
 	SDL_Renderer *render_ren = SDL_CreateRenderer(render_win, -1, SDL_RENDERER_ACCELERATED);
 	if (!render_ren) render_ren = SDL_CreateRenderer(render_win, -1, SDL_RENDERER_SOFTWARE);
 
@@ -125,18 +195,14 @@ int main(int argc, char *argv[]) {
 
 	SDL_UpdateTexture(preview_tex, NULL, last_pixels, render_width * sizeof(uint32_t));
 
-	// --- UI window (ImGui controls only) ---
 	int fx, fy;
 	SDL_GetWindowPosition(render_win, &fx, &fy);
 	SDL_Window *ui_win = SDL_CreateWindow(
 		"Mandelbrot Controls",
 		fx + actual_w + 20, fy,
-		400, 640,
+		440, 720,
 		SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE);
-	if (!ui_win) {
-		fprintf(stderr, "SDL_CreateWindow(ui) Error: %s\n", SDL_GetError());
-		return 1;
-	}
+	if (!ui_win) { fprintf(stderr, "SDL_CreateWindow(ui) Error\n"); return 1; }
 	SDL_Renderer *ui_ren = SDL_CreateRenderer(ui_win, -1, SDL_RENDERER_ACCELERATED);
 	if (!ui_ren) ui_ren = SDL_CreateRenderer(ui_win, -1, SDL_RENDERER_SOFTWARE);
 
@@ -204,7 +270,6 @@ int main(int argc, char *argv[]) {
 	float ui_red_stagger = config.palette.redStagger;
 	float ui_green_stagger = config.palette.greenStagger;
 	float ui_blue_stagger = config.palette.blueStagger;
-
 	double ui_wave_period = config.palette.colourWavePeriod;
 	double ui_red_period = config.palette.redPeriod;
 	double ui_green_period = config.palette.greenPeriod;
@@ -218,13 +283,18 @@ int main(int argc, char *argv[]) {
 
 	bool palette_changed = false;
 
-	char state_filename[256] = "state.json";
 	bool state_loaded_msg = false;
 	bool state_saved_msg = false;
 	bool state_url_msg = false;
-	Uint32 msg_time = 0;
 
+	bool saving_msg = false;
+	bool pending_save = false;
+	char pending_save_path[1024] = {0};	
+
+	Uint32 msg_time = 0;
 	bool load_success = false;
+
+	bool cx_editing = false, cy_editing = false, zoom_editing = false;
 
 	while (running) {
 		SDL_Event e;
@@ -243,6 +313,18 @@ int main(int argc, char *argv[]) {
 			}
 
 			if (evt_win == ui_win_id) {
+				// Middle click paste support (X11 primary selection)
+				if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_MIDDLE) {
+					char* primary_text = SDL_GetPrimarySelectionText();
+					if (primary_text && *primary_text) {
+						SDL_Event text_ev;
+						SDL_zero(text_ev);
+						text_ev.type = SDL_TEXTINPUT;
+						strncpy(text_ev.text.text, primary_text, sizeof(text_ev.text.text) - 1);
+						SDL_PushEvent(&text_ev);
+					}
+					if (primary_text) SDL_free(primary_text);
+				}
 				ImGui_ImplSDL2_ProcessEvent(&e);
 			}
 
@@ -331,11 +413,21 @@ int main(int argc, char *argv[]) {
 			pending_resize = 0;
 			if (resize_new_w != render_width || resize_new_h != render_height) {
 				int old_w = render_width;
+				int old_h = render_height;
 				render_state.active = 0; abort_render = 0;
-				if (old_w > 0 && resize_new_w != old_w) {
-					mpf_t ratio; mpf_init2(ratio, 256);
-					mpf_set_ui(ratio, resize_new_w); mpf_div_ui(ratio, ratio, old_w);
-					mpf_mul(view.zoom, view.zoom, ratio); mpf_clear(ratio);
+				if (old_w > 0 && old_h > 0) {
+					double aspect_old = (double)old_w / (double)old_h;
+					double aspect_new = (double)resize_new_w / (double)resize_new_h;
+					if (aspect_new > aspect_old) {
+						// Window became relatively wider: preserve vertical world extent,
+						// extend the horizontal view so the wider viewport still fits.
+						mpf_t ratio; mpf_init2(ratio, 256);
+						mpf_set_d(ratio, aspect_new / aspect_old);
+						mpf_mul(view.zoom, view.zoom, ratio);
+						mpf_clear(ratio);
+					}
+					// Otherwise (narrower or equal): keep world width fixed. World height
+					// either shrinks (crop) or grows (extend) to match the new aspect ratio.
 				}
 				set_render_size(resize_new_w, resize_new_h);
 				free(pixels); pixels = (uint32_t*)calloc((size_t)render_width * render_height, sizeof(uint32_t));
@@ -346,7 +438,6 @@ int main(int argc, char *argv[]) {
 			}
 		}
 
-		// --- ImGui frame ---
 		ImGui_ImplSDLRenderer2_NewFrame();
 		ImGui_ImplSDL2_NewFrame();
 		ImGui::NewFrame();
@@ -360,32 +451,62 @@ int main(int argc, char *argv[]) {
 			ImGuiWindowFlags_NoCollapse |
 			ImGuiWindowFlags_NoBringToFrontOnFocus);
 
-		char buf[128];
-		mpf_to_str(view.cx, buf, sizeof(buf)); ImGui::Text("Center X: %s", buf);
-		mpf_to_str(view.cy, buf, sizeof(buf)); ImGui::Text("Center Y: %s", buf);
-		mpf_to_str(view.zoom, buf, sizeof(buf)); ImGui::Text("Zoom: %s", buf);
-
+		bool view_param_changed = false;
 		bool geometry_changed = false;
 		bool colour_changed = false;
 		bool modifiers_changed = false;
 
+		// --- View parameters ---
+		ImGui::Text("View");
+		static char cx_edit_buf[128] = {0};
+		static char cy_edit_buf[128] = {0};
+		static char zoom_edit_buf[128] = {0};
 
+		if (!cx_editing) gmp_snprintf(cx_edit_buf, sizeof(cx_edit_buf), "%.25Fe", view.cx);
+		if (!cy_editing) gmp_snprintf(cy_edit_buf, sizeof(cy_edit_buf), "%.25Fe", view.cy);
+		if (!zoom_editing) gmp_snprintf(zoom_edit_buf, sizeof(zoom_edit_buf), "%.25Fe", view.zoom);
+
+		ImGui::TextUnformatted("X:"); ImGui::SameLine(30);
+		ImGui::SetNextItemWidth(370);
+		if (ImGui::InputText("##cx", cx_edit_buf, sizeof(cx_edit_buf), ImGuiInputTextFlags_CharsScientific)) cx_editing = true;
+		if (ImGui::IsItemDeactivatedAfterEdit()) {
+			if (mpf_set_str(view.cx, cx_edit_buf, 10) == 0) { view_param_changed = true; cx_editing = false; }
+		}
+		if (ImGui::IsItemDeactivated()) cx_editing = false;
+
+		ImGui::TextUnformatted("Y:"); ImGui::SameLine(30);
+		ImGui::SetNextItemWidth(370);
+		if (ImGui::InputText("##cy", cy_edit_buf, sizeof(cy_edit_buf), ImGuiInputTextFlags_CharsScientific)) cy_editing = true;
+		if (ImGui::IsItemDeactivatedAfterEdit()) {
+			if (mpf_set_str(view.cy, cy_edit_buf, 10) == 0) { view_param_changed = true; cy_editing = false; }
+		}
+		if (ImGui::IsItemDeactivated()) cy_editing = false;
+
+		ImGui::TextUnformatted("Zoom:"); ImGui::SameLine(44);
+		ImGui::SetNextItemWidth(356);
+		if (ImGui::InputText("##zoom", zoom_edit_buf, sizeof(zoom_edit_buf), ImGuiInputTextFlags_CharsScientific)) zoom_editing = true;
+		if (ImGui::IsItemDeactivatedAfterEdit()) {
+			if (mpf_set_str(view.zoom, zoom_edit_buf, 10) == 0) { view_param_changed = true; zoom_editing = false; }
+		}
+		if (ImGui::IsItemDeactivated()) zoom_editing = false;
+
+		if (view_param_changed) {
+			pending_render = 1; last_wheel_time = SDL_GetTicks();
+			if (render_state.active) abort_render = 1;
+		}
+
+		// --- State Management ---
 		ImGui::Separator();
 		ImGui::Text("State Management");
-		ImGui::InputText("File", state_filename, sizeof(state_filename));
-		if (ImGui::Button("Save State")) {
-			if (save_state(state_filename, view.cx, view.cy, view.zoom)) {
-				state_saved_msg = true; state_loaded_msg = false; state_url_msg = false;
-				msg_time = SDL_GetTicks();
-			}
+		bool dialog_busy = (g_dialog.pipe != NULL);
+		if (dialog_busy) ImGui::BeginDisabled();
+
+		if (ImGui::Button("Save Image...")) {
+			start_file_dialog(true, "Save Mandelbrot Render");
 		}
 		ImGui::SameLine();
-		if (ImGui::Button("Load State")) {
-			if (load_state(state_filename, view.cx, view.cy, view.zoom)) {
-				state_loaded_msg = true; state_saved_msg = false; state_url_msg = false;
-				msg_time = SDL_GetTicks();
-				load_success = true;
-			}
+		if (ImGui::Button("Load Image...")) {
+			start_file_dialog(false, "Load Mandelbrot Render");
 		}
 		ImGui::SameLine();
 		if (ImGui::Button("Copy URL for Web")) {
@@ -397,15 +518,12 @@ int main(int argc, char *argv[]) {
 				msg_time = SDL_GetTicks();
 			}
 		}
-
-		if (state_loaded_msg && (SDL_GetTicks() - msg_time < 3000))
-			ImGui::TextColored(ImVec4(0, 1, 0, 1), "State loaded!");
-		else if (state_saved_msg && (SDL_GetTicks() - msg_time < 3000))
-			ImGui::TextColored(ImVec4(0, 1, 0, 1), "State saved!");
-		else if (state_url_msg && (SDL_GetTicks() - msg_time < 3000))
-			ImGui::TextColored(ImVec4(0, 1, 0, 1), "URL copied to clipboard!");
-
-		if (load_success) {
+		ImGui::SameLine();
+		if (ImGui::Button("Reset")) {
+			reset_config();
+			mpf_set_d(view.cx, -0.5);
+			mpf_set_d(view.cy, 0.0);
+			mpf_set_d(view.zoom, 4.0);
 			sync_ui_from_config(
 				ui_max_iter, ui_max_radius, ui_recursion, ui_count_offset, ui_end_condition,
 				ui_calc_iter, ui_calc_disp, ui_calc_rot, ui_calc_xor_disp, ui_calc_xor_polar,
@@ -414,15 +532,47 @@ int main(int argc, char *argv[]) {
 				ui_wave_period, ui_red_period, ui_green_period, ui_blue_period,
 				ui_stagger_before, ui_stagger_after,
 				ui_mask_red, ui_mask_green, ui_mask_blue);
-
-			// Force a fresh render from the new view
+			cx_editing = cy_editing = zoom_editing = false;
 			have_last_render = 0;
 			pending_render = 1;
 			last_wheel_time = SDL_GetTicks();
 			if (render_state.active) abort_render = 1;
-			load_success = false;
+			state_loaded_msg = state_saved_msg = state_url_msg = false;
 		}
 
+		if (dialog_busy) ImGui::EndDisabled();
+
+		if (dialog_busy) {
+			char path[1024];
+			int res = poll_file_dialog(path, sizeof(path));
+			if (res == 1) {
+				if (g_dialog.is_save) {
+					snprintf(pending_save_path, sizeof(pending_save_path), "%s", path);
+					pending_save = true;
+					saving_msg = true;
+					render_state.active = 0;
+					abort_render = 0;
+					pending_render = 0;
+				} else {
+					if (load_render(path, view.cx, view.cy, view.zoom)) {
+						state_loaded_msg = true; state_saved_msg = false; state_url_msg = false;
+						msg_time = SDL_GetTicks();
+						load_success = true;
+					}
+				}
+			}
+		}
+
+		if (saving_msg)
+			ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.0f, 1.0f), "Saving...");
+		else if (state_loaded_msg && (SDL_GetTicks() - msg_time < 3000))
+			ImGui::TextColored(ImVec4(0, 1, 0, 1), "State loaded!");
+		else if (state_saved_msg && (SDL_GetTicks() - msg_time < 3000))
+			ImGui::TextColored(ImVec4(0, 1, 0, 1), "State saved!");
+		else if (state_url_msg && (SDL_GetTicks() - msg_time < 3000))
+			ImGui::TextColored(ImVec4(0, 1, 0, 1), "URL copied to clipboard!");
+
+		// --- Fractal Parameters ---
 		ImGui::Separator();
 		ImGui::Text("Fractal Parameters");
 
@@ -431,17 +581,22 @@ int main(int argc, char *argv[]) {
 			geometry_changed = true;
 		}
 		ImGui::SameLine();
-		if (ImGui::Button("×2")) { ui_max_iter *= 2; geometry_changed = true; }
+		if (ImGui::Button("×2##it")) { ui_max_iter *= 2; geometry_changed = true; }
 		ImGui::SameLine();
-		if (ImGui::Button("÷2")) { ui_max_iter /= 2; if (ui_max_iter < 1) ui_max_iter = 1; geometry_changed = true; }
+		if (ImGui::Button("÷2##it")) { ui_max_iter /= 2; if (ui_max_iter < 1) ui_max_iter = 1; geometry_changed = true; }
 
-		if (ImGui::SliderFloat("Max Radius", &ui_max_radius, 2.0f, 100.0f)) { geometry_changed = true; }
-		if (ImGui::SliderInt("Recursion", &ui_recursion, 1, 10)) { geometry_changed = true; }
+		if (ImGui::SliderFloat("Max Radius", &ui_max_radius, 2.0f, 100.0f)) geometry_changed = true;
 
-		if (InputDoubleWheel("Count Offset", &ui_count_offset, 0.1, 1.0)) { colour_changed = true; }
+		if (InputIntWheel("Recursion", &ui_recursion, 1)) {
+			if (ui_recursion < 1) ui_recursion = 1;
+			if (ui_recursion > 10) ui_recursion = 10;
+			geometry_changed = true;
+		}
+
+		if (InputDoubleWheel("Count Offset", &ui_count_offset, 1.0, 10.0)) colour_changed = true;
 
 		const char* conditions[] = { "Addition", "Multiplication", "Subtraction", "Fluffy Cloud", "Foliage" };
-		if (ImGui::Combo("End Condition", &ui_end_condition, conditions, IM_ARRAYSIZE(conditions))) { geometry_changed = true; }
+		if (ImGui::Combo("End Condition", &ui_end_condition, conditions, IM_ARRAYSIZE(conditions))) geometry_changed = true;
 
 		if (geometry_changed) {
 			config.options.max_iter = ui_max_iter;
@@ -456,19 +611,15 @@ int main(int argc, char *argv[]) {
 			if (have_last_render) redraw_palette(pixels, last_pixels, tex, preview_tex, render_ren);
 		}
 
+		// --- Calculation Modifiers ---
 		ImGui::Separator();
 		ImGui::Text("Calculation Modifiers");
 
-		if (ImGui::Checkbox("Iterations##calciter", &ui_calc_iter)) modifiers_changed = true;
-		ImGui::SameLine(); if (InputDoubleWheel("Coef##iter", &config.options.coefIterations, 0.01, 0.1)) modifiers_changed = true;
-		if (ImGui::Checkbox("Displacement", &ui_calc_disp)) modifiers_changed = true;
-		ImGui::SameLine(); if (InputDoubleWheel("Coef##disp", &config.options.coefDisplacement, 0.01, 0.1)) modifiers_changed = true;
-		if (ImGui::Checkbox("Rotation", &ui_calc_rot)) modifiers_changed = true;
-		ImGui::SameLine(); if (InputDoubleWheel("Coef##rot", &config.options.coefRotation, 0.01, 0.1)) modifiers_changed = true;
-		if (ImGui::Checkbox("XOR Disp", &ui_calc_xor_disp)) modifiers_changed = true;
-		ImGui::SameLine(); if (InputDoubleWheel("Coef##xor_disp", &config.options.coefDisplacementXOR, 0.01, 0.1)) modifiers_changed = true;
-		if (ImGui::Checkbox("XOR Polar", &ui_calc_xor_polar)) modifiers_changed = true;
-		ImGui::SameLine(); if (InputDoubleWheel("Coef##xor_polar", &config.options.coefPolarCoordXOR, 0.01, 0.1)) modifiers_changed = true;
+		if (ModifierRow("Iterations",   "##iter",      &ui_calc_iter,     &config.options.coefIterations))       modifiers_changed = true;
+		if (ModifierRow("Displacement", "##disp",      &ui_calc_disp,     &config.options.coefDisplacement))     modifiers_changed = true;
+		if (ModifierRow("Rotation",     "##rot",       &ui_calc_rot,      &config.options.coefRotation))         modifiers_changed = true;
+		if (ModifierRow("XOR Disp",     "##xor_disp",  &ui_calc_xor_disp, &config.options.coefDisplacementXOR))  modifiers_changed = true;
+		if (ModifierRow("XOR Polar",    "##xor_polar", &ui_calc_xor_polar, &config.options.coefPolarCoordXOR))   modifiers_changed = true;
 
 		if (modifiers_changed) {
 			config.options.calcIterations = ui_calc_iter ? 1 : 0;
@@ -479,6 +630,7 @@ int main(int argc, char *argv[]) {
 			if (have_last_render) redraw_palette(pixels, last_pixels, tex, preview_tex, render_ren);
 		}
 
+		// --- Palette Controls ---
 		ImGui::Separator();
 		ImGui::Text("Palette Controls");
 
@@ -494,12 +646,10 @@ int main(int argc, char *argv[]) {
 				if (ImGui::Checkbox("Before Mods", &ui_stagger_before)) palette_changed = true;
 				ImGui::SameLine();
 				if (ImGui::Checkbox("After Mods", &ui_stagger_after)) palette_changed = true;
-
 				if (ImGui::SliderFloat("Master", &ui_master_stagger, -3.14f, 3.14f)) palette_changed = true;
 				if (ImGui::SliderFloat("Red", &ui_red_stagger, -3.14f, 3.14f)) palette_changed = true;
 				if (ImGui::SliderFloat("Green", &ui_green_stagger, -3.14f, 3.14f)) palette_changed = true;
 				if (ImGui::SliderFloat("Blue", &ui_blue_stagger, -3.14f, 3.14f)) palette_changed = true;
-
 				ImGui::Separator();
 				ImGui::Text("Bitmasks (binary strings)");
 				if (ImGui::InputText("Red##mask", ui_mask_red, sizeof(ui_mask_red), ImGuiInputTextFlags_CharsDecimal)) palette_changed = true;
@@ -508,12 +658,16 @@ int main(int argc, char *argv[]) {
 				ImGui::EndTabItem();
 			}
 			if (ImGui::BeginTabItem("Period")) {
-				if (InputDoubleWheel("Wave Period", &ui_wave_period, 1.0, 10.0)) palette_changed = true;
+				if (InputDoubleWheel("Wave Period", &ui_wave_period, 0.1, 1.0)) palette_changed = true;
+				ImGui::SameLine();
+				if (ImGui::Button("×2##wp")) { ui_wave_period *= 2; palette_changed = true; }
+				ImGui::SameLine();
+				if (ImGui::Button("÷2##wp")) { ui_wave_period /= 2; palette_changed = true; }
 				ImGui::Separator();
 				ImGui::Text("Multipliers:");
-				if (InputDoubleWheel("Red##mult", &ui_red_period, 0.1, 1.0)) palette_changed = true;
-				if (InputDoubleWheel("Green##mult", &ui_green_period, 0.1, 1.0)) palette_changed = true;
-				if (InputDoubleWheel("Blue##mult", &ui_blue_period, 0.1, 1.0)) palette_changed = true;
+				if (InputDoubleWheel("Red##mult", &ui_red_period, 0.001, 0.01)) palette_changed = true;
+				if (InputDoubleWheel("Green##mult", &ui_green_period, 0.001, 0.01)) palette_changed = true;
+				if (InputDoubleWheel("Blue##mult", &ui_blue_period, 0.001, 0.01)) palette_changed = true;
 				ImGui::EndTabItem();
 			}
 			ImGui::EndTabBar();
@@ -534,14 +688,12 @@ int main(int argc, char *argv[]) {
 			config.palette.bluePeriod = ui_blue_period;
 			config.palette.staggerBefore = ui_stagger_before ? 1 : 0;
 			config.palette.staggerAfter = ui_stagger_after ? 1 : 0;
-
 			config.palette.staggerMaskRed = (int)strtol(ui_mask_red, NULL, 2);
 			config.palette.staggerMaskRedLen = strlen(ui_mask_red) > 0 ? strlen(ui_mask_red) : 1;
 			config.palette.staggerMaskGreen = (int)strtol(ui_mask_green, NULL, 2);
 			config.palette.staggerMaskGreenLen = strlen(ui_mask_green) > 0 ? strlen(ui_mask_green) : 1;
 			config.palette.staggerMaskBlue = (int)strtol(ui_mask_blue, NULL, 2);
 			config.palette.staggerMaskBlueLen = strlen(ui_mask_blue) > 0 ? strlen(ui_mask_blue) : 1;
-
 			if (have_last_render) redraw_palette(pixels, last_pixels, tex, preview_tex, render_ren);
 			palette_changed = false;
 		}
@@ -549,7 +701,23 @@ int main(int argc, char *argv[]) {
 		ImGui::End();
 		ImGui::Render();
 
-		// --- Fractal rendering ---
+		if (load_success) {
+			sync_ui_from_config(
+				ui_max_iter, ui_max_radius, ui_recursion, ui_count_offset, ui_end_condition,
+				ui_calc_iter, ui_calc_disp, ui_calc_rot, ui_calc_xor_disp, ui_calc_xor_polar,
+				ui_master_offset, ui_red_offset, ui_green_offset, ui_blue_offset,
+				ui_master_stagger, ui_red_stagger, ui_green_stagger, ui_blue_stagger,
+				ui_wave_period, ui_red_period, ui_green_period, ui_blue_period,
+				ui_stagger_before, ui_stagger_after,
+				ui_mask_red, ui_mask_green, ui_mask_blue);
+			cx_editing = cy_editing = zoom_editing = false;
+			have_last_render = 0;
+			pending_render = 1;
+			last_wheel_time = SDL_GetTicks();
+			if (render_state.active) abort_render = 1;
+			load_success = false;
+		}
+
 		if (render_state.active && abort_render) {
 			render_state.active = 0;
 			abort_render = 0;
@@ -575,7 +743,6 @@ int main(int argc, char *argv[]) {
 			}
 		}
 
-		// --- Present fractal window ---
 		SDL_SetRenderDrawColor(render_ren, 0, 0, 0, 255);
 		SDL_RenderClear(render_ren);
 		bool in_scrolling = pending_render && ((SDL_GetTicks() - last_wheel_time) < WHEEL_DEBOUNCE_MS) && have_last_render;
@@ -593,11 +760,21 @@ int main(int argc, char *argv[]) {
 		}
 		SDL_RenderPresent(render_ren);
 
-		// --- Present UI window ---
 		SDL_SetRenderDrawColor(ui_ren, 32, 32, 32, 255);
 		SDL_RenderClear(ui_ren);
 		ImGui_ImplSDLRenderer2_RenderDrawData(ImGui::GetDrawData(), ui_ren);
 		SDL_RenderPresent(ui_ren);
+
+		if (pending_save) {
+			pending_save = false;
+			if (save_render_png(pending_save_path, view.cx, view.cy, view.zoom, render_width, render_height)) {
+				state_saved_msg = true;
+				state_loaded_msg = false;
+				state_url_msg = false;
+				msg_time = SDL_GetTicks();
+			}
+			saving_msg = false;
+		}
 
 		SDL_Delay(5);
 	}
@@ -610,6 +787,7 @@ int main(int argc, char *argv[]) {
 	mpf_clear(last_render_cx); mpf_clear(last_render_cy); mpf_clear(last_render_zoom);
 	mpf_clear(drag_start_cx); mpf_clear(drag_start_cy);
 	free(pixels); free(last_pixels); free(g_results); free(g_counts);
+
 	SDL_DestroyTexture(tex); SDL_DestroyTexture(preview_tex);
 	SDL_DestroyRenderer(render_ren); SDL_DestroyWindow(render_win);
 	SDL_DestroyRenderer(ui_ren); SDL_DestroyWindow(ui_win);

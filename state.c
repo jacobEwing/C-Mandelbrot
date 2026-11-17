@@ -3,7 +3,16 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <dirent.h>
+#include <unistd.h>
+#include <SDL2/SDL.h>
+#include <png.h>
 #include "cjson/cJSON.h"
+
+/* ---- String/enum conversion helpers ---- */
 
 static const char* ec_to_str(int ec) {
 	switch (ec) {
@@ -33,6 +42,8 @@ static void int_to_bin_str(int val, int len, char* out, int maxlen) {
 	out[len] = '\0';
 }
 
+/* ---- cJSON typed getters with defaults ---- */
+
 static double get_num(const cJSON* parent, const char* name, double dflt) {
 	cJSON* item = cJSON_GetObjectItemCaseSensitive(parent, name);
 	if (!item) return dflt;
@@ -55,14 +66,40 @@ static const char* get_str(const cJSON* parent, const char* name, const char* df
 	return item->valuestring;
 }
 
-// Builds the full config JSON tree. Caller must cJSON_Delete() the result.
+/* ---- Base64 encoder (RFC 4648, no line breaks, standard alphabet) ---- */
+
+static const char b64_alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+static char* base64_encode(const unsigned char* data, size_t len) {
+	size_t out_len = 4 * ((len + 2) / 3);
+	char* out = malloc(out_len + 1);
+	if (!out) return NULL;
+	size_t i = 0, j = 0;
+	while (i < len) {
+		unsigned int b0 = (i < len) ? data[i++] : 0;
+		unsigned int b1 = (i < len) ? data[i++] : 0;
+		unsigned int b2 = (i < len) ? data[i++] : 0;
+		unsigned int triple = (b0 << 16) | (b1 << 8) | b2;
+		out[j++] = b64_alphabet[(triple >> 18) & 0x3F];
+		out[j++] = b64_alphabet[(triple >> 12) & 0x3F];
+		out[j++] = b64_alphabet[(triple >> 6) & 0x3F];
+		out[j++] = b64_alphabet[triple & 0x3F];
+	}
+	int pad = (int)((3 - (len % 3)) % 3);
+	for (int p = 0; p < pad; p++) out[out_len - 1 - p] = '=';
+	out[out_len] = '\0';
+	return out;
+}
+
+/* ---- JSON tree builder ---- */
+
 static cJSON* build_state_tree(mpf_t cx, mpf_t cy, mpf_t zoom) {
 	cJSON* root = cJSON_CreateObject();
 	if (!root) return NULL;
 
 	char buf[256];
 
-	// --- map ---
+	/* --- map --- */
 	cJSON* map = cJSON_CreateObject();
 	cJSON_AddItemToObject(root, "map", map);
 	cJSON_AddNumberToObject(map, "x", mpf_get_d(cx));
@@ -70,7 +107,8 @@ static cJSON* build_state_tree(mpf_t cx, mpf_t cy, mpf_t zoom) {
 	cJSON_AddNumberToObject(map, "width", mpf_get_d(zoom));
 	cJSON_AddNumberToObject(map, "height", mpf_get_d(zoom));
 	cJSON_AddNumberToObject(map, "accuracy", config.options.max_iter);
-	// _precise fields preserve GMP precision for native round-trips
+	/* _precise fields preserve GMP precision for native round-trips.
+	   The web app ignores unknown fields, so these are harmless there. */
 	gmp_snprintf(buf, sizeof(buf), "%.80Ff", cx);
 	cJSON_AddStringToObject(map, "x_precise", buf);
 	gmp_snprintf(buf, sizeof(buf), "%.80Ff", cy);
@@ -78,7 +116,7 @@ static cJSON* build_state_tree(mpf_t cx, mpf_t cy, mpf_t zoom) {
 	gmp_snprintf(buf, sizeof(buf), "%.80Ff", zoom);
 	cJSON_AddStringToObject(map, "zoom_precise", buf);
 
-	// --- palette ---
+	/* --- palette --- */
 	cJSON* palette = cJSON_CreateObject();
 	cJSON_AddItemToObject(root, "palette", palette);
 	cJSON_AddNumberToObject(palette, "colourWavePeriod", config.palette.colourWavePeriod);
@@ -115,7 +153,7 @@ static cJSON* build_state_tree(mpf_t cx, mpf_t cy, mpf_t zoom) {
 	int_to_bin_str(config.palette.staggerMaskBlue, config.palette.staggerMaskBlueLen, buf, sizeof(buf));
 	cJSON_AddStringToObject(mask, "blue", buf);
 
-	// --- options ---
+	/* --- options --- */
 	cJSON* options = cJSON_CreateObject();
 	cJSON_AddItemToObject(root, "options", options);
 
@@ -145,41 +183,9 @@ static cJSON* build_state_tree(mpf_t cx, mpf_t cy, mpf_t zoom) {
 	return root;
 }
 
-int save_state(const char* filename, mpf_t cx, mpf_t cy, mpf_t zoom) {
-	cJSON* root = build_state_tree(cx, cy, zoom);
-	if (!root) return 0;
-	char* json_str = cJSON_Print(root);
-	cJSON_Delete(root);
-	if (!json_str) return 0;
+/* ---- JSON tree parser ---- */
 
-	FILE* f = fopen(filename, "w");
-	int ok = 0;
-	if (f) {
-		fputs(json_str, f);
-		fclose(f);
-		ok = 1;
-	}
-	free(json_str);
-	return ok;
-}
-
-int load_state(const char* filename, mpf_t cx, mpf_t cy, mpf_t zoom) {
-	FILE* f = fopen(filename, "r");
-	if (!f) return 0;
-
-	fseek(f, 0, SEEK_END);
-	long size = ftell(f);
-	fseek(f, 0, SEEK_SET);
-	if (size <= 0 || size > 1024 * 1024) { fclose(f); return 0; }
-
-	char* buf = malloc(size + 1);
-	if (!buf) { fclose(f); return 0; }
-	if (fread(buf, 1, size, f) != (size_t)size) { free(buf); fclose(f); return 0; }
-	buf[size] = '\0';
-	fclose(f);
-
-	cJSON* root = cJSON_Parse(buf);
-	free(buf);
+static int parse_state_tree(cJSON* root, mpf_t cx, mpf_t cy, mpf_t zoom) {
 	if (!root) return 0;
 
 	cJSON* map = cJSON_GetObjectItemCaseSensitive(root, "map");
@@ -266,32 +272,362 @@ int load_state(const char* filename, mpf_t cx, mpf_t cy, mpf_t zoom) {
 		config.options.countOffset = get_num(options, "countOffset", config.options.countOffset);
 	}
 
-	cJSON_Delete(root);
 	return 1;
 }
 
-static const char b64_alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+/* ---- Save directory ---- */
 
-static char* base64_encode(const unsigned char* data, size_t len) {
-	size_t out_len = 4 * ((len + 2) / 3);
-	char* out = malloc(out_len + 1);
-	if (!out) return NULL;
-	size_t i = 0, j = 0;
-	while (i < len) {
-		unsigned int b0 = (i < len) ? data[i++] : 0;
-		unsigned int b1 = (i < len) ? data[i++] : 0;
-		unsigned int b2 = (i < len) ? data[i++] : 0;
-		unsigned int triple = (b0 << 16) | (b1 << 8) | b2;
-		out[j++] = b64_alphabet[(triple >> 18) & 0x3F];
-		out[j++] = b64_alphabet[(triple >> 12) & 0x3F];
-		out[j++] = b64_alphabet[(triple >> 6) & 0x3F];
-		out[j++] = b64_alphabet[triple & 0x3F];
-	}
-	int pad = (int)((3 - (len % 3)) % 3);
-	for (int p = 0; p < pad; p++) out[out_len - 1 - p] = '=';
-	out[out_len] = '\0';
-	return out;
+char* get_save_dir(void) {
+	const char* home = getenv("HOME");
+	if (!home || !*home) return NULL;
+	size_t len = strlen(home) + 32;
+	char* dir = malloc(len);
+	if (!dir) return NULL;
+	snprintf(dir, len, "%s/.mandelbrot", home);
+	mkdir(dir, 0755);   /* ignore EEXIST */
+	return dir;
 }
+
+/* ---- Image renderer (three-way dispatch, matches the main renderer) ---- */
+static void render_image(uint32_t* pixels, int width, int height,
+                         mpf_t cx, mpf_t cy, mpf_t zoom) {
+	double zoom_d = mpf_get_d(zoom);
+	double aspect = (double)height / (double)width;
+
+	int use_perturbation = (zoom_d < 1e-28)
+		&& (config.options.endCondition == 0)
+		&& (config.options.recursionDepth == 1);
+	int use_df64 = (zoom_d < 1e-12) && !use_perturbation;
+
+	mpf_t step_x_mpf, step_y_mpf, aspect_mpf;
+	mpf_init2(step_x_mpf, 256);
+	mpf_init2(step_y_mpf, 256);
+	mpf_init2(aspect_mpf, 256);
+	mpf_div_ui(step_x_mpf, zoom, width);
+	mpf_set_d(aspect_mpf, aspect);
+	mpf_mul(step_y_mpf, zoom, aspect_mpf);
+	mpf_div_ui(step_y_mpf, step_y_mpf, height);
+	df64 step_x = mpf_to_df64(step_x_mpf);
+	df64 step_y = mpf_to_df64(step_y_mpf);
+	mpf_clear(step_x_mpf); mpf_clear(step_y_mpf); mpf_clear(aspect_mpf);
+
+	if (use_perturbation) {
+		compute_reference_orbit(cx, cy, zoom);
+		df64 ref_off_x = ref.offset_x;
+		df64 ref_off_y = ref.offset_y;
+
+		#pragma omp parallel for schedule(dynamic, 4)
+		for (int y = 0; y < height; y++) {
+			df64 y_off = df_mul_d(step_y, (double)(y - height / 2));
+			df64 dci = df_add(y_off, ref_off_y);
+			for (int x = 0; x < width; x++) {
+				df64 x_off = df_mul_d(step_x, (double)(x - width / 2));
+				df64 dc = df_add(x_off, ref_off_x);
+				Result r = mandelbrot_perturbation(dc, dci, config.options.max_iter);
+				pixels[y * width + x] = create_colour(&r);
+			}
+		}
+	} else if (use_df64) {
+		df64 cx_df = mpf_to_df64(cx);
+		df64 cy_df = mpf_to_df64(cy);
+
+		#pragma omp parallel for schedule(dynamic, 4)
+		for (int y = 0; y < height; y++) {
+			df64 y_off = df_mul_d(step_y, (double)(y - height / 2));
+			df64 ci_df = df_add(cy_df, y_off);
+			for (int x = 0; x < width; x++) {
+				df64 x_off = df_mul_d(step_x, (double)(x - width / 2));
+				df64 cr_df = df_add(cx_df, x_off);
+				Result r = mandelbrot_calc_df64(cr_df, ci_df, config.options.max_iter, config.options.recursionDepth);
+				pixels[y * width + x] = create_colour(&r);
+			}
+		}
+	} else {
+		double cx_d = mpf_get_d(cx);
+		double cy_d = mpf_get_d(cy);
+		double width_d = zoom_d;
+		double height_d = width_d * aspect;
+		double x_min = cx_d - width_d / 2.0;
+		double y_min = cy_d - height_d / 2.0;
+		double dx = width_d / width;
+		double dy = height_d / height;
+
+		#pragma omp parallel for schedule(dynamic, 4)
+		for (int y = 0; y < height; y++) {
+			double ci = y_min + y * dy;
+			for (int x = 0; x < width; x++) {
+				double cr = x_min + x * dx;
+				Result r = mandelbrot_calc(cr, ci, config.options.max_iter, config.options.recursionDepth);
+				pixels[y * width + x] = create_colour(&r);
+			}
+		}
+	}
+}
+
+/* ---- PNG save with metadata ---- */
+int save_render_png(const char* name_or_path, mpf_t cx, mpf_t cy, mpf_t zoom, int width, int height) {
+	if (width < 1) width = 1;
+	if (height < 1) height = 1;
+
+	char path[1024];
+
+	/* Absolute path (or relative starting with ./) — use as-is */
+	if (name_or_path[0] == '/' || (name_or_path[0] == '.' && name_or_path[1] == '/')) {
+		snprintf(path, sizeof(path), "%s", name_or_path);
+	} else {
+		char* dir = get_save_dir();
+		if (!dir) return 0;
+		snprintf(path, sizeof(path), "%s/%s", dir, name_or_path);
+		free(dir);
+	}
+
+	/* Append .png if missing */
+	size_t plen = strlen(path);
+	if (plen < 4 || strcasecmp(path + plen - 4, ".png") != 0) {
+		if (plen + 5 < sizeof(path)) {
+			strcat(path, ".png");
+		}
+	}
+
+	uint32_t* pixels = malloc((size_t)width * height * 4);
+	if (!pixels) return 0;
+	render_image(pixels, width, height, cx, cy, zoom);
+
+	cJSON* root = build_state_tree(cx, cy, zoom);
+	if (!root) { free(pixels); return 0; }
+	char* json_str = cJSON_PrintUnformatted(root);
+	cJSON_Delete(root);
+	if (!json_str) { free(pixels); return 0; }
+
+	FILE* fp = fopen(path, "wb");
+	if (!fp) { free(pixels); free(json_str); return 0; }
+
+	png_structp png = png_create_write_struct(PNG_LIBPNG_VER_STRING, NULL, NULL, NULL);
+	png_infop info = png ? png_create_info_struct(png) : NULL;
+	if (!png || !info) {
+		if (png) png_destroy_write_struct(&png, NULL);
+		fclose(fp); free(pixels); free(json_str);
+		return 0;
+	}
+	if (setjmp(png_jmpbuf(png))) {
+		png_destroy_write_struct(&png, &info);
+		fclose(fp); free(pixels); free(json_str);
+		return 0;
+	}
+	png_init_io(png, fp);
+	png_set_IHDR(png, info, width, height, 8,
+		PNG_COLOR_TYPE_RGB, PNG_INTERLACE_NONE,
+		PNG_COMPRESSION_TYPE_DEFAULT, PNG_FILTER_TYPE_DEFAULT);
+
+	png_text text;
+	memset(&text, 0, sizeof(text));
+	text.compression = PNG_ITXT_COMPRESSION_NONE;
+	text.key = (png_charp)"MandelbrotConfig";
+	text.text = json_str;
+	text.text_length = strlen(json_str);
+	text.itxt_length = strlen(json_str);
+	text.lang = (png_charp)"en";
+	text.lang_key = (png_charp)"";
+	png_set_text(png, info, &text, 1);
+
+	png_write_info(png, info);
+
+	uint8_t* row = malloc((size_t)width * 3);
+	for (int y = 0; y < height; y++) {
+		for (int x = 0; x < width; x++) {
+			uint32_t p = pixels[y * width + x];
+			row[x * 3 + 0] = (p >> 16) & 0xFF;
+			row[x * 3 + 1] = (p >> 8) & 0xFF;
+			row[x * 3 + 2] = p & 0xFF;
+		}
+		png_write_row(png, row);
+	}
+	free(row);
+
+	png_write_end(png, NULL);
+	png_destroy_write_struct(&png, &info);
+	fclose(fp);
+	free(pixels);
+	free(json_str);
+	return 1;
+}
+
+/* ---- Load config from PNG metadata ---- */
+
+static int load_png_config(const char* path, mpf_t cx, mpf_t cy, mpf_t zoom) {
+	FILE* fp = fopen(path, "rb");
+	if (!fp) return 0;
+	uint8_t sig[8];
+	if (fread(sig, 1, 8, fp) != 8 || png_sig_cmp(sig, 0, 8) != 0) { fclose(fp); return 0; }
+	rewind(fp);
+
+	png_structp png = png_create_read_struct(PNG_LIBPNG_VER_STRING, NULL, NULL, NULL);
+	png_infop info = png ? png_create_info_struct(png) : NULL;
+	if (!png || !info) { if (png) png_destroy_read_struct(&png, NULL, NULL); fclose(fp); return 0; }
+	if (setjmp(png_jmpbuf(png))) { png_destroy_read_struct(&png, &info, NULL); fclose(fp); return 0; }
+
+	png_init_io(png, fp);
+	png_read_info(png, info);
+
+	png_textp text_ptr;
+	int num_text = 0;
+	png_get_text(png, info, &text_ptr, &num_text);
+
+	int ok = 0;
+	for (int i = 0; i < num_text; i++) {
+		if (strcmp(text_ptr[i].key, "MandelbrotConfig") == 0) {
+			cJSON* root = cJSON_Parse(text_ptr[i].text);
+			if (root) {
+				ok = parse_state_tree(root, cx, cy, zoom);
+				cJSON_Delete(root);
+			}
+			break;
+		}
+	}
+
+	png_destroy_read_struct(&png, &info, NULL);
+	fclose(fp);
+	return ok;
+}
+
+/* ---- JSON file load (fallback) ---- */
+
+static int load_json_file(const char* path, mpf_t cx, mpf_t cy, mpf_t zoom) {
+	FILE* f = fopen(path, "r");
+	if (!f) return 0;
+	fseek(f, 0, SEEK_END);
+	long sz = ftell(f);
+	fseek(f, 0, SEEK_SET);
+	if (sz <= 0 || sz > 1024 * 1024) { fclose(f); return 0; }
+	char* buf = malloc(sz + 1);
+	if (!buf) { fclose(f); return 0; }
+	if (fread(buf, 1, sz, f) != (size_t)sz) { free(buf); fclose(f); return 0; }
+	buf[sz] = '\0';
+	fclose(f);
+
+	cJSON* root = cJSON_Parse(buf);
+	free(buf);
+	if (!root) return 0;
+	int ok = parse_state_tree(root, cx, cy, zoom);
+	cJSON_Delete(root);
+	return ok;
+}
+
+/* ---- Dispatcher ---- */
+
+int load_render(const char* name_or_path, mpf_t cx, mpf_t cy, mpf_t zoom) {
+	char path[2048];
+	struct stat st;
+
+	if ((name_or_path[0] == '/' || name_or_path[0] == '.') && stat(name_or_path, &st) == 0) {
+		snprintf(path, sizeof(path), "%s", name_or_path);
+	} else {
+		char* dir = get_save_dir();
+		if (!dir) return 0;
+		snprintf(path, sizeof(path), "%s/%s.png", dir, name_or_path);
+		if (stat(path, &st) != 0) {
+			snprintf(path, sizeof(path), "%s/%s.json", dir, name_or_path);
+			if (stat(path, &st) != 0) {
+				snprintf(path, sizeof(path), "%s/%s", dir, name_or_path);
+			}
+		}
+		free(dir);
+	}
+
+	const char* ext = strrchr(path, '.');
+	if (ext && (strcasecmp(ext, ".png") == 0)) return load_png_config(path, cx, cy, zoom);
+	return load_json_file(path, cx, cy, zoom);
+}
+
+/* ---- Gallery: list saved PNG basenames ---- */
+
+char** list_saved_renders(int* count) {
+	*count = 0;
+	char* dir = get_save_dir();
+	if (!dir) return NULL;
+
+	DIR* d = opendir(dir);
+	if (!d) { free(dir); return NULL; }
+
+	char** names = NULL;
+	int cap = 0;
+	struct dirent* ent;
+	while ((ent = readdir(d)) != NULL) {
+		size_t nlen = strlen(ent->d_name);
+		if (nlen < 5) continue;
+		if (strcasecmp(ent->d_name + nlen - 4, ".png") != 0) continue;
+
+		if (*count >= cap) {
+			cap = cap ? cap * 2 : 16;
+			char** tmp = realloc(names, cap * sizeof(char*));
+			if (!tmp) break;
+			names = tmp;
+		}
+		names[*count] = strdup(ent->d_name);
+		(*count)++;
+	}
+	closedir(d);
+	free(dir);
+	return names;
+}
+
+/* ---- Load a thumbnail PNG as an SDL_Texture ---- */
+
+SDL_Texture* load_thumbnail_texture(SDL_Renderer* ren, const char* name) {
+	char* dir = get_save_dir();
+	if (!dir) return NULL;
+	char path[1024];
+	snprintf(path, sizeof(path), "%s/%s.png", dir, name);
+	free(dir);
+
+	FILE* fp = fopen(path, "rb");
+	if (!fp) return NULL;
+	uint8_t sig[8];
+	if (fread(sig, 1, 8, fp) != 8 || png_sig_cmp(sig, 0, 8) != 0) { fclose(fp); return NULL; }
+	rewind(fp);
+
+	png_structp png = png_create_read_struct(PNG_LIBPNG_VER_STRING, NULL, NULL, NULL);
+	png_infop info = png ? png_create_info_struct(png) : NULL;
+	if (!png || !info) { if (png) png_destroy_read_struct(&png, NULL, NULL); fclose(fp); return NULL; }
+	if (setjmp(png_jmpbuf(png))) { png_destroy_read_struct(&png, &info, NULL); fclose(fp); return NULL; }
+
+	png_init_io(png, fp);
+	png_read_info(png, info);
+
+	png_uint_32 w = png_get_image_width(png, info);
+	png_uint_32 h = png_get_image_height(png, info);
+	int color_type = png_get_color_type(png, info);
+	int bit_depth = png_get_bit_depth(png, info);
+
+	if (bit_depth == 16) png_set_strip_16(png);
+	if (color_type == PNG_COLOR_TYPE_PALETTE) png_set_palette_to_rgb(png);
+	if (color_type == PNG_COLOR_TYPE_GRAY && bit_depth < 8) png_set_expand_gray_1_2_4_to_8(png);
+	if (png_get_valid(png, info, PNG_INFO_tRNS)) png_set_tRNS_to_alpha(png);
+	if (color_type == PNG_COLOR_TYPE_RGB || color_type == PNG_COLOR_TYPE_GRAY || color_type == PNG_COLOR_TYPE_PALETTE) {
+		png_set_filler(png, 0xFF, PNG_FILLER_AFTER);
+	}
+	if (color_type == PNG_COLOR_TYPE_GRAY || color_type == PNG_COLOR_TYPE_GRAY_ALPHA) {
+		png_set_gray_to_rgb(png);
+	}
+	png_read_update_info(png, info);
+
+	size_t rowbytes = png_get_rowbytes(png, info);
+	uint8_t* data = malloc(rowbytes * h);
+	png_bytep* rows = malloc(sizeof(png_bytep) * h);
+	for (png_uint_32 y = 0; y < h; y++) rows[y] = data + y * rowbytes;
+	png_read_image(png, rows);
+	free(rows);
+
+	png_destroy_read_struct(&png, &info, NULL);
+	fclose(fp);
+
+	SDL_Texture* tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_STATIC, w, h);
+	if (tex) SDL_UpdateTexture(tex, NULL, data, (int)rowbytes);
+	free(data);
+	return tex;
+}
+
+/* ---- URL for the web app ---- */
 
 char* get_state_url(mpf_t cx, mpf_t cy, mpf_t zoom) {
 	cJSON* root = build_state_tree(cx, cy, zoom);
@@ -309,4 +645,15 @@ char* get_state_url(mpf_t cx, mpf_t cy, mpf_t zoom) {
 	if (url) snprintf(url, url_len, MANDELBROT_WEB_URL "?config=%s", b64);
 	free(b64);
 	return url;
+}
+
+/* ---- Delete ---- */
+
+int delete_saved_render(const char* name) {
+	char* dir = get_save_dir();
+	if (!dir) return 0;
+	char path[1024];
+	snprintf(path, sizeof(path), "%s/%s.png", dir, name);
+	free(dir);
+	return remove(path) == 0;
 }
