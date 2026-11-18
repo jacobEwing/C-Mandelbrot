@@ -9,7 +9,7 @@
 #endif
 
 int render_width = 800;
-int render_height = 600;
+int render_height = 450;
 Result *g_results = NULL;
 uint16_t *g_counts = NULL;
 RenderState render_state = { 0 };
