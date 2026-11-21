@@ -1,4 +1,6 @@
 *.o
 .*.swp
 imgui.ini
+mandelbrot
+animandel
 

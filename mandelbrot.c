@@ -26,7 +26,8 @@ static const RenderConfig default_config = {
 		.maxRadius = 4.0,
 		.endCondition = 0,
 		.recursionDepth = 1
-	}
+	},
+	.viewRotation = 0.0
 };
 
 RenderConfig config;

@@ -31,22 +31,42 @@ int compute_preview_transform(mpf_t cx, mpf_t cy, mpf_t zoom,
                               double *out_s, double *out_off_x, double *out_off_y) {
 	if (mpf_sgn(last_zoom) == 0) return 0;
 
-	mpf_t s, w, h, temp, off_x, off_y;
+	mpf_t s, w, h, dcx, dcy, rx, ry, temp, off_x, off_y, fct, fst;
 	mpf_init2(s, 256); mpf_init2(w, 256); mpf_init2(h, 256);
+	mpf_init2(dcx, 256); mpf_init2(dcy, 256);
+	mpf_init2(rx, 256); mpf_init2(ry, 256);
 	mpf_init2(temp, 256); mpf_init2(off_x, 256); mpf_init2(off_y, 256);
+	mpf_init2(fct, 256); mpf_init2(fst, 256);
 
 	mpf_div(s, last_zoom, zoom);
 	double s_d = mpf_get_d(s);
 	if (!(s_d > 1e-3 && s_d < 1e3)) {
-		mpf_clears(s, w, h, temp, off_x, off_y, NULL);
+		mpf_clears(s, w, h, dcx, dcy, rx, ry, temp, off_x, off_y, fct, fst, NULL);
 		return 0;
 	}
 
 	mpf_set_d(w, render_width);
 	mpf_set_d(h, render_height);
 
-	mpf_sub(temp, last_cx, cx);
-	mpf_mul(temp, temp, w);
+	mpf_sub(dcx, last_cx, cx);
+	mpf_sub(dcy, last_cy, cy);
+
+	double th = config.viewRotation;
+	mpf_set_d(fct, cos(th));
+	mpf_set_d(fst, sin(th));
+
+	/* rx = ct*dcx + st*dcy */
+	mpf_mul(rx, fct, dcx);
+	mpf_mul(temp, fst, dcy);
+	mpf_add(rx, rx, temp);
+
+	/* ry = ct*dcy - st*dcx */
+	mpf_mul(ry, fct, dcy);
+	mpf_mul(temp, fst, dcx);
+	mpf_sub(ry, ry, temp);
+
+	/* off_x = w/2 + rx*w/zoom - w*s/2 */
+	mpf_mul(temp, rx, w);
 	mpf_div(temp, temp, zoom);
 	mpf_div_ui(off_x, w, 2);
 	mpf_add(off_x, off_x, temp);
@@ -54,8 +74,8 @@ int compute_preview_transform(mpf_t cx, mpf_t cy, mpf_t zoom,
 	mpf_div_ui(temp, temp, 2);
 	mpf_sub(off_x, off_x, temp);
 
-	mpf_sub(temp, last_cy, cy);
-	mpf_mul(temp, temp, w);
+	/* off_y = h/2 + ry*w/zoom - h*s/2 */
+	mpf_mul(temp, ry, w);
 	mpf_div(temp, temp, zoom);
 	mpf_div_ui(off_y, h, 2);
 	mpf_add(off_y, off_y, temp);
@@ -67,12 +87,12 @@ int compute_preview_transform(mpf_t cx, mpf_t cy, mpf_t zoom,
 	*out_off_x = mpf_get_d(off_x);
 	*out_off_y = mpf_get_d(off_y);
 
-	mpf_clears(s, w, h, temp, off_x, off_y, NULL);
+	mpf_clears(s, w, h, dcx, dcy, rx, ry, temp, off_x, off_y, fct, fst, NULL);
 	return 1;
 }
 
 void fill_scaled_background(uint32_t *pixels, const uint32_t *last_pixels,
-                            double s, double off_x, double off_y) {
+	                        double s, double off_x, double off_y) {
 	for (int y = 0; y < render_height; y++) {
 		double src_y = (y - off_y) / s;
 		int sy = (int)src_y;
@@ -91,11 +111,19 @@ void fill_scaled_background(uint32_t *pixels, const uint32_t *last_pixels,
 	}
 }
 
-static void render_row_double(uint32_t *pixels, int y, double x_min, double y_min, double dx, double dy) {
-	double ci = y_min + y * dy;
+static void render_row_double(uint32_t *pixels, int y,
+                              double view_cx, double view_cy,
+                              double dx_step, double dy_step,
+                              double rot_c, double rot_s) {
+	double yi = ((double)y - render_height / 2.0) * dy_step;
+	double cr_row_base = view_cx - yi * rot_s;
+	double ci_row_base = view_cy + yi * rot_c;
 	for (int x = 0; x < render_width; x++) {
-		double cr = x_min + x * dx;
-		Result r = mandelbrot_calc(cr, ci, config.options.max_iter, config.options.recursionDepth);
+		double xi = ((double)x - render_width / 2.0) * dx_step;
+		double cr = cr_row_base + xi * rot_c;
+		double ci = ci_row_base + xi * rot_s;
+		Result r = mandelbrot_calc(cr, ci, config.options.max_iter,
+		                           config.options.recursionDepth);
 		g_results[y * render_width + x] = r;
 		pixels[y * render_width + x] = create_colour(&r);
 		g_counts[y * render_width + x] = (uint16_t)r.count;
@@ -104,10 +132,15 @@ static void render_row_double(uint32_t *pixels, int y, double x_min, double y_mi
 
 static void render_row_perturbation(uint32_t *pixels, int y,
                                     df64 dx_df, df64 dy_df,
-                                    df64 ref_offset_x, df64 ref_offset_y) {
-	df64 dci = df_add(df_mul_d(dy_df, (double)(y - render_height / 2)), ref_offset_y);
+                                    df64 ref_offset_x, df64 ref_offset_y,
+                                    double rot_c, double rot_s) {
+	df64 yi = df_mul_d(dy_df, (double)(y - render_height / 2));
+	df64 dc_row_base  = df_add(df_mul_d(yi, -rot_s), ref_offset_x);
+	df64 dci_row_base = df_add(df_mul_d(yi,  rot_c), ref_offset_y);
 	for (int x = 0; x < render_width; x++) {
-		df64 dc = df_add(df_mul_d(dx_df, (double)(x - render_width / 2)), ref_offset_x);
+		df64 xi = df_mul_d(dx_df, (double)(x - render_width / 2));
+		df64 dc  = df_add(df_mul_d(xi, rot_c), dc_row_base);
+		df64 dci = df_add(df_mul_d(xi, rot_s), dci_row_base);
 		Result r = mandelbrot_perturbation(dc, dci, config.options.max_iter);
 		g_results[y * render_width + x] = r;
 		pixels[y * render_width + x] = create_colour(&r);
@@ -117,13 +150,18 @@ static void render_row_perturbation(uint32_t *pixels, int y,
 
 static void render_row_df64_direct(uint32_t *pixels, int y,
                                    df64 dx_df, df64 dy_df,
-                                   df64 view_cx_df, df64 view_cy_df) {
-	df64 y_off = df_mul_d(dy_df, (double)(y - render_height / 2));
-	df64 ci_df = df_add(view_cy_df, y_off);
+                                   df64 view_cx_df, df64 view_cy_df,
+                                   double rot_c, double rot_s) {
+	df64 yi = df_mul_d(dy_df, (double)(y - render_height / 2));
+	df64 cr_row_base = df_add(view_cx_df, df_mul_d(yi, -rot_s));
+	df64 ci_row_base = df_add(view_cy_df, df_mul_d(yi,  rot_c));
 	for (int x = 0; x < render_width; x++) {
-		df64 x_off = df_mul_d(dx_df, (double)(x - render_width / 2));
-		df64 cr_df = df_add(view_cx_df, x_off);
-		Result r = mandelbrot_calc_df64(cr_df, ci_df, config.options.max_iter, config.options.recursionDepth);
+		df64 xi = df_mul_d(dx_df, (double)(x - render_width / 2));
+		df64 cr_df = df_add(cr_row_base, df_mul_d(xi, rot_c));
+		df64 ci_df = df_add(ci_row_base, df_mul_d(xi, rot_s));
+		Result r = mandelbrot_calc_df64(cr_df, ci_df,
+		                                config.options.max_iter,
+		                                config.options.recursionDepth);
 		g_results[y * render_width + x] = r;
 		pixels[y * render_width + x] = create_colour(&r);
 		g_counts[y * render_width + x] = (uint16_t)r.count;
@@ -147,6 +185,8 @@ void begin_render(mpf_t cx, mpf_t cy, mpf_t zoom,
 	render_state.view_cx_df = mpf_to_df64(cx);
 	render_state.view_cy_df = mpf_to_df64(cy);
 	render_state.t_start = SDL_GetTicks();
+	render_state.rot_c = cos(config.viewRotation);
+	render_state.rot_s = sin(config.viewRotation);
 
 	double preview_s, preview_off_x, preview_off_y;
 	int have_preview = have_last && compute_preview_transform(cx, cy, zoom, last_cx, last_cy, last_zoom,
@@ -194,12 +234,10 @@ void begin_render(mpf_t cx, mpf_t cy, mpf_t zoom,
 		render_state.dy_df = mpf_to_df64(dy_mpf);
 		mpf_clear(dx_mpf); mpf_clear(dy_mpf); mpf_clear(aspect_mpf);
 	} else {
-		double width = zoom_d;
-		double height = width * aspect;
-		render_state.x_min = cx_d - width / 2.0;
-		render_state.y_min = cy_d - height / 2.0;
-		render_state.dx = width / render_width;
-		render_state.dy = height / render_height;
+		render_state.view_cx_d = cx_d;
+		render_state.view_cy_d = cy_d;
+		render_state.dx_scale = zoom_d / render_width;
+		render_state.dy_scale = (zoom_d * aspect) / render_height;
 	}
 
 	render_state.t_render_start = SDL_GetTicks();
@@ -211,14 +249,25 @@ int render_strip(uint32_t *pixels, SDL_Texture *tex, SDL_Renderer *ren) {
 	int y_end = y_start + STRIP_HEIGHT;
 	if (y_end > render_height) y_end = render_height;
 
+	double ct = render_state.rot_c;
+	double st = render_state.rot_s;
 	#pragma omp parallel for schedule(dynamic, 1)
 	for (int y = y_start; y < y_end; y++) {
 		if (render_state.use_perturbation) {
-			render_row_perturbation(pixels, y, render_state.dx_df, render_state.dy_df, render_state.ref_off_x_df, render_state.ref_off_y_df);
+			render_row_perturbation(pixels, y,
+				render_state.dx_df, render_state.dy_df,
+				render_state.ref_off_x_df, render_state.ref_off_y_df,
+				ct, st);
 		} else if (render_state.use_df64_direct) {
-			render_row_df64_direct(pixels, y, render_state.dx_df, render_state.dy_df, render_state.view_cx_df, render_state.view_cy_df);
+			render_row_df64_direct(pixels, y,
+				render_state.dx_df, render_state.dy_df,
+				render_state.view_cx_df, render_state.view_cy_df,
+				ct, st);
 		} else {
-			render_row_double(pixels, y, render_state.x_min, render_state.y_min, render_state.dx, render_state.dy);
+			render_row_double(pixels, y,
+				render_state.view_cx_d, render_state.view_cy_d,
+				render_state.dx_scale, render_state.dy_scale,
+				ct, st);
 		}
 	}
 

@@ -20,13 +20,8 @@
 #define WHEEL_DEBOUNCE_MS 100
 #define RESIZE_DEBOUNCE_MS 100
 
-typedef struct {
-	mpf_t cx;
-	mpf_t cy;
-	mpf_t zoom;
-} ViewState;
-
 static void sync_ui_from_config(
+	float& ui_rotation,
 	int& ui_max_iter, float& ui_max_radius, int& ui_recursion, double& ui_count_offset, int& ui_end_condition,
 	bool& ui_calc_iter, bool& ui_calc_disp, bool& ui_calc_rot, bool& ui_calc_xor_disp, bool& ui_calc_xor_polar,
 	float& ui_master_offset, float& ui_red_offset, float& ui_green_offset, float& ui_blue_offset,
@@ -35,6 +30,7 @@ static void sync_ui_from_config(
 	bool& ui_stagger_before, bool& ui_stagger_after,
 	char* ui_mask_red, char* ui_mask_green, char* ui_mask_blue)
 {
+	ui_rotation = (float)config.viewRotation;
 	ui_max_iter = config.options.max_iter;
 	ui_max_radius = config.options.maxRadius;
 	ui_recursion = config.options.recursionDepth;
@@ -86,6 +82,16 @@ static bool InputDoubleWheel(const char* label, double* v, double step = 0.01, d
 	}
 	return changed;
 }
+
+static bool InputFloatWheel(const char* label, float* v, float step = 0.01, float step_fast = 0.1) {
+	bool changed = ImGui::InputFloat(label, v, step, step_fast, "%.6f");
+	if (ImGui::IsItemHovered() && ImGui::GetIO().MouseWheel != 0.0f) {
+		*v += ImGui::GetIO().MouseWheel * step;
+		changed = true;
+	}
+	return changed;
+}
+
 
 static bool ModifierRow(const char* label, const char* id, bool* flag, double* coef) {
 	bool changed = false;
@@ -209,6 +215,7 @@ int main(int argc, char *argv[]) {
 	IMGUI_CHECKVERSION();
 	ImGui::CreateContext();
 	ImGuiIO& io = ImGui::GetIO(); (void)io;
+	io.IniFilename = NULL;
 	ImGui::StyleColorsDark();
 	ImGui_ImplSDL2_InitForSDLRenderer(ui_win, ui_ren);
 	ImGui_ImplSDLRenderer2_Init(ui_ren);
@@ -262,6 +269,7 @@ int main(int argc, char *argv[]) {
 	bool ui_calc_xor_disp = config.options.calcDisplacementXOR;
 	bool ui_calc_xor_polar = config.options.calcPolarCoordXOR;
 
+	float ui_rotation = (float)config.viewRotation;
 	float ui_master_offset = config.palette.masterOffset;
 	float ui_red_offset = config.palette.redOffset;
 	float ui_green_offset = config.palette.greenOffset;
@@ -362,13 +370,16 @@ int main(int argc, char *argv[]) {
 						double ix = (double)e.button.x, iy = (double)e.button.y;
 						double ddx = ix - drag_start_mx, ddy = iy - drag_start_my;
 						if (ddx * ddx + ddy * ddy < 25) {
+							double th = config.viewRotation, thc = cos(th), ths = sin(th);
+							double sx = ix - render_width / 2.0;
+							double sy = iy - render_height / 2.0;
+							double wx = sx * thc - sy * ths;
+							double wy = sx * ths + sy * thc;
 							mpf_t scale, temp, offset;
 							mpf_init2(scale, 256); mpf_init2(temp, 256); mpf_init2(offset, 256);
 							mpf_div_ui(scale, view.zoom, render_width);
-							mpf_set_d(temp, ix - render_width / 2.0);
-							mpf_mul(offset, temp, scale); mpf_add(view.cx, view.cx, offset);
-							mpf_set_d(temp, iy - render_height / 2.0);
-							mpf_mul(offset, temp, scale); mpf_add(view.cy, view.cy, offset);
+							mpf_set_d(temp, wx); mpf_mul(offset, temp, scale); mpf_add(view.cx, view.cx, offset);
+							mpf_set_d(temp, wy); mpf_mul(offset, temp, scale); mpf_add(view.cy, view.cy, offset);
 							mpf_clear(scale); mpf_clear(temp); mpf_clear(offset);
 							pending_render = 1; last_wheel_time = SDL_GetTicks();
 							if (render_state.active) abort_render = 1;
@@ -377,32 +388,51 @@ int main(int argc, char *argv[]) {
 					dragging = 0;
 				} else if (e.type == SDL_MOUSEMOTION && dragging) {
 					double ix = (double)e.motion.x, iy = (double)e.motion.y;
-					double ddx = ix - drag_start_mx, ddy = iy - drag_start_my;
+					double sddx = ix - drag_start_mx, sddy = iy - drag_start_my;
+					double th = config.viewRotation, thc = cos(th), ths = sin(th);
+					double wddx = sddx * thc - sddy * ths;
+					double wddy = sddx * ths + sddy * thc;
 					mpf_t scale, dx_mpf, dy_mpf, temp;
 					mpf_init2(scale, 256); mpf_init2(dx_mpf, 256); mpf_init2(dy_mpf, 256); mpf_init2(temp, 256);
 					mpf_div_ui(scale, view.zoom, render_width);
-					mpf_set_d(temp, ddx); mpf_mul(dx_mpf, temp, scale);
+					mpf_set_d(temp, wddx); mpf_mul(dx_mpf, temp, scale);
 					mpf_sub(view.cx, drag_start_cx, dx_mpf);
-					mpf_set_d(temp, ddy); mpf_mul(dy_mpf, temp, scale);
+					mpf_set_d(temp, wddy); mpf_mul(dy_mpf, temp, scale);
 					mpf_sub(view.cy, drag_start_cy, dy_mpf);
 					mpf_clear(scale); mpf_clear(dx_mpf); mpf_clear(dy_mpf); mpf_clear(temp);
 					pending_render = 1; last_wheel_time = SDL_GetTicks();
 					if (render_state.active) abort_render = 1;
 				} else if (e.type == SDL_MOUSEWHEEL) {
 					int mx_raw, my_raw; SDL_GetMouseState(&mx_raw, &my_raw);
-					double mx = (double)mx_raw, my = (double)my_raw;
-					mpf_t scale, dx, dy, temp, fx2, fy2;
-					mpf_init2(scale, 256); mpf_init2(dx, 256); mpf_init2(dy, 256);
+					double th = config.viewRotation, thc = cos(th), ths = sin(th);
+					double sx = (double)mx_raw - render_width / 2.0;
+					double sy = (double)my_raw - render_height / 2.0;
+					double wx = sx * thc - sy * ths;
+					double wy = sx * ths + sy * thc;
+
+					mpf_t scale, wx_mpf, wy_mpf, temp, fx2, fy2, ratio, old_zoom;
+					mpf_init2(scale, 256); mpf_init2(wx_mpf, 256); mpf_init2(wy_mpf, 256);
 					mpf_init2(temp, 256); mpf_init2(fx2, 256); mpf_init2(fy2, 256);
+					mpf_init2(ratio, 256); mpf_init2(old_zoom, 256);
+
 					mpf_div_ui(scale, view.zoom, render_width);
-					mpf_set_d(temp, mx - render_width / 2.0); mpf_mul(dx, temp, scale); mpf_add(fx2, view.cx, dx);
-					mpf_set_d(temp, my - render_height / 2.0); mpf_mul(dy, temp, scale); mpf_add(fy2, view.cy, dy);
+					mpf_set_d(temp, wx); mpf_mul(wx_mpf, temp, scale);
+					mpf_set_d(temp, wy); mpf_mul(wy_mpf, temp, scale);
+					mpf_add(fx2, view.cx, wx_mpf);
+					mpf_add(fy2, view.cy, wy_mpf);
+
+					mpf_set(old_zoom, view.zoom);
 					if (e.wheel.y > 0) { mpf_mul_ui(view.zoom, view.zoom, 9); mpf_div_ui(view.zoom, view.zoom, 10); }
 					else if (e.wheel.y < 0) { mpf_mul_ui(view.zoom, view.zoom, 10); mpf_div_ui(view.zoom, view.zoom, 9); }
-					mpf_div_ui(scale, view.zoom, render_width);
-					mpf_set_d(temp, mx - render_width / 2.0); mpf_mul(dx, temp, scale); mpf_sub(view.cx, fx2, dx);
-					mpf_set_d(temp, my - render_height / 2.0); mpf_mul(dy, temp, scale); mpf_sub(view.cy, fy2, dy);
-					mpf_clear(scale); mpf_clear(dx); mpf_clear(dy); mpf_clear(temp); mpf_clear(fx2); mpf_clear(fy2);
+					mpf_div(ratio, view.zoom, old_zoom);
+
+					mpf_mul(wx_mpf, wx_mpf, ratio);
+					mpf_mul(wy_mpf, wy_mpf, ratio);
+					mpf_sub(view.cx, fx2, wx_mpf);
+					mpf_sub(view.cy, fy2, wy_mpf);
+
+					mpf_clear(scale); mpf_clear(wx_mpf); mpf_clear(wy_mpf); mpf_clear(temp);
+					mpf_clear(fx2); mpf_clear(fy2); mpf_clear(ratio); mpf_clear(old_zoom);
 					pending_render = 1; last_wheel_time = SDL_GetTicks();
 					if (render_state.active) abort_render = 1;
 				}
@@ -490,6 +520,18 @@ int main(int argc, char *argv[]) {
 		}
 		if (ImGui::IsItemDeactivated()) zoom_editing = false;
 
+		ImGui::TextUnformatted("Rotation:"); ImGui::SameLine(44);
+		ImGui::SetNextItemWidth(356);
+		if (InputFloatWheel("##rotation", &ui_rotation, 0.01, 0.1)){
+//		if (ImGui::SliderFloat("##rotation", &ui_rotation, -3.14159265f, 3.14159265f,
+//		                       "%.4f rad")) {
+			config.viewRotation = (double)ui_rotation;
+			have_last_render = 0;
+			pending_render = 1;
+			last_wheel_time = SDL_GetTicks();
+			if (render_state.active) abort_render = 1;
+		}
+
 		if (view_param_changed) {
 			pending_render = 1; last_wheel_time = SDL_GetTicks();
 			if (render_state.active) abort_render = 1;
@@ -525,7 +567,7 @@ int main(int argc, char *argv[]) {
 			mpf_set_d(view.cy, 0.0);
 			mpf_set_d(view.zoom, 4.0);
 			sync_ui_from_config(
-				ui_max_iter, ui_max_radius, ui_recursion, ui_count_offset, ui_end_condition,
+				ui_rotation, ui_max_iter, ui_max_radius, ui_recursion, ui_count_offset, ui_end_condition,
 				ui_calc_iter, ui_calc_disp, ui_calc_rot, ui_calc_xor_disp, ui_calc_xor_polar,
 				ui_master_offset, ui_red_offset, ui_green_offset, ui_blue_offset,
 				ui_master_stagger, ui_red_stagger, ui_green_stagger, ui_blue_stagger,
@@ -703,7 +745,7 @@ int main(int argc, char *argv[]) {
 
 		if (load_success) {
 			sync_ui_from_config(
-				ui_max_iter, ui_max_radius, ui_recursion, ui_count_offset, ui_end_condition,
+				ui_rotation, ui_max_iter, ui_max_radius, ui_recursion, ui_count_offset, ui_end_condition,
 				ui_calc_iter, ui_calc_disp, ui_calc_rot, ui_calc_xor_disp, ui_calc_xor_polar,
 				ui_master_offset, ui_red_offset, ui_green_offset, ui_blue_offset,
 				ui_master_stagger, ui_red_stagger, ui_green_stagger, ui_blue_stagger,

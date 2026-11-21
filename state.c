@@ -115,7 +115,8 @@ static cJSON* build_state_tree(mpf_t cx, mpf_t cy, mpf_t zoom) {
 	cJSON_AddStringToObject(map, "y_precise", buf);
 	gmp_snprintf(buf, sizeof(buf), "%.80Ff", zoom);
 	cJSON_AddStringToObject(map, "zoom_precise", buf);
-
+	cJSON_AddNumberToObject(map, "rotation", config.viewRotation);
+	
 	/* --- palette --- */
 	cJSON* palette = cJSON_CreateObject();
 	cJSON_AddItemToObject(root, "palette", palette);
@@ -202,6 +203,7 @@ static int parse_state_tree(cJSON* root, mpf_t cx, mpf_t cy, mpf_t zoom) {
 		else mpf_set_d(zoom, get_num(map, "width", 4.0));
 
 		config.options.max_iter = get_int(map, "accuracy", config.options.max_iter);
+		config.viewRotation = get_num(map, "rotation", config.viewRotation);
 	}
 
 	cJSON* palette = cJSON_GetObjectItemCaseSensitive(root, "palette");
@@ -289,9 +291,8 @@ char* get_save_dir(void) {
 }
 
 /* ---- Image renderer (three-way dispatch, matches the main renderer) ---- */
-static void render_image(uint32_t* pixels, int width, int height,
-                         mpf_t cx, mpf_t cy, mpf_t zoom) {
-	double zoom_d = mpf_get_d(zoom);
+void render_image(uint32_t* pixels, int width, int height, ViewState* view) {
+	double zoom_d = mpf_get_d(view->zoom);
 	double aspect = (double)height / (double)width;
 
 	int use_perturbation = (zoom_d < 1e-28)
@@ -299,119 +300,124 @@ static void render_image(uint32_t* pixels, int width, int height,
 		&& (config.options.recursionDepth == 1);
 	int use_df64 = (zoom_d < 1e-12) && !use_perturbation;
 
+	double theta = config.viewRotation;
+	double ct = cos(theta), st = sin(theta);
+
 	mpf_t step_x_mpf, step_y_mpf, aspect_mpf;
 	mpf_init2(step_x_mpf, 256);
 	mpf_init2(step_y_mpf, 256);
 	mpf_init2(aspect_mpf, 256);
-	mpf_div_ui(step_x_mpf, zoom, width);
+	mpf_div_ui(step_x_mpf, view->zoom, width);
 	mpf_set_d(aspect_mpf, aspect);
-	mpf_mul(step_y_mpf, zoom, aspect_mpf);
+	mpf_mul(step_y_mpf, view->zoom, aspect_mpf);
 	mpf_div_ui(step_y_mpf, step_y_mpf, height);
 	df64 step_x = mpf_to_df64(step_x_mpf);
 	df64 step_y = mpf_to_df64(step_y_mpf);
 	mpf_clear(step_x_mpf); mpf_clear(step_y_mpf); mpf_clear(aspect_mpf);
 
 	if (use_perturbation) {
-		compute_reference_orbit(cx, cy, zoom);
+		compute_reference_orbit(view->cx, view->cy, view->zoom);
 		df64 ref_off_x = ref.offset_x;
 		df64 ref_off_y = ref.offset_y;
 
 		#pragma omp parallel for schedule(dynamic, 4)
 		for (int y = 0; y < height; y++) {
-			df64 y_off = df_mul_d(step_y, (double)(y - height / 2));
-			df64 dci = df_add(y_off, ref_off_y);
+			df64 yi = df_mul_d(step_y, (double)(y - height / 2));
+			df64 dc_row_base = df_add(df_mul_d(yi, -st), ref_off_x);
+			df64 dci_row_base = df_add(df_mul_d(yi, ct), ref_off_y);
 			for (int x = 0; x < width; x++) {
-				df64 x_off = df_mul_d(step_x, (double)(x - width / 2));
-				df64 dc = df_add(x_off, ref_off_x);
+				df64 xi = df_mul_d(step_x, (double)(x - width / 2));
+				df64 dc  = df_add(df_mul_d(xi, ct), dc_row_base);
+				df64 dci = df_add(df_mul_d(xi, st), dci_row_base);
 				Result r = mandelbrot_perturbation(dc, dci, config.options.max_iter);
 				pixels[y * width + x] = create_colour(&r);
 			}
 		}
 	} else if (use_df64) {
-		df64 cx_df = mpf_to_df64(cx);
-		df64 cy_df = mpf_to_df64(cy);
+		df64 cx_df = mpf_to_df64(view->cx);
+		df64 cy_df = mpf_to_df64(view->cy);
 
 		#pragma omp parallel for schedule(dynamic, 4)
 		for (int y = 0; y < height; y++) {
-			df64 y_off = df_mul_d(step_y, (double)(y - height / 2));
-			df64 ci_df = df_add(cy_df, y_off);
+			df64 yi = df_mul_d(step_y, (double)(y - height / 2));
+			df64 cr_row_base = df_add(cx_df, df_mul_d(yi, -st));
+			df64 ci_row_base = df_add(cy_df, df_mul_d(yi, ct));
 			for (int x = 0; x < width; x++) {
-				df64 x_off = df_mul_d(step_x, (double)(x - width / 2));
-				df64 cr_df = df_add(cx_df, x_off);
-				Result r = mandelbrot_calc_df64(cr_df, ci_df, config.options.max_iter, config.options.recursionDepth);
+				df64 xi = df_mul_d(step_x, (double)(x - width / 2));
+				df64 cr_df = df_add(cr_row_base, df_mul_d(xi, ct));
+				df64 ci_df = df_add(ci_row_base, df_mul_d(xi, st));
+				Result r = mandelbrot_calc_df64(cr_df, ci_df,
+				                                config.options.max_iter,
+				                                config.options.recursionDepth);
 				pixels[y * width + x] = create_colour(&r);
 			}
 		}
 	} else {
-		double cx_d = mpf_get_d(cx);
-		double cy_d = mpf_get_d(cy);
-		double width_d = zoom_d;
+		double cx_d = mpf_get_d(view->cx);
+		double cy_d = mpf_get_d(view->cy);
+		double width_d  = zoom_d;
 		double height_d = width_d * aspect;
-		double x_min = cx_d - width_d / 2.0;
-		double y_min = cy_d - height_d / 2.0;
-		double dx = width_d / width;
-		double dy = height_d / height;
+		double dx_step  = width_d  / width;
+		double dy_step  = height_d / height;
 
 		#pragma omp parallel for schedule(dynamic, 4)
 		for (int y = 0; y < height; y++) {
-			double ci = y_min + y * dy;
+			double yi = ((double)y - height / 2.0) * dy_step;
+			double cr_row_base = cx_d - yi * st;
+			double ci_row_base = cy_d + yi * ct;
 			for (int x = 0; x < width; x++) {
-				double cr = x_min + x * dx;
-				Result r = mandelbrot_calc(cr, ci, config.options.max_iter, config.options.recursionDepth);
+				double xi = ((double)x - width / 2.0) * dx_step;
+				double cr = cr_row_base + xi * ct;
+				double ci = ci_row_base + xi * st;
+				Result r = mandelbrot_calc(cr, ci, config.options.max_iter,
+				                           config.options.recursionDepth);
 				pixels[y * width + x] = create_colour(&r);
 			}
 		}
 	}
 }
-
 /* ---- PNG save with metadata ---- */
-int save_render_png(const char* name_or_path, mpf_t cx, mpf_t cy, mpf_t zoom, int width, int height) {
-	if (width < 1) width = 1;
-	if (height < 1) height = 1;
-
-	char path[1024];
-
-	/* Absolute path (or relative starting with ./) — use as-is */
+static void resolve_save_path(const char* name_or_path, char* path, size_t path_size) {
 	if (name_or_path[0] == '/' || (name_or_path[0] == '.' && name_or_path[1] == '/')) {
-		snprintf(path, sizeof(path), "%s", name_or_path);
+		snprintf(path, path_size, "%s", name_or_path);
 	} else {
 		char* dir = get_save_dir();
-		if (!dir) return 0;
-		snprintf(path, sizeof(path), "%s/%s", dir, name_or_path);
-		free(dir);
+		if (dir) {
+			snprintf(path, path_size, "%s/%s", dir, name_or_path);
+			free(dir);
+		} else {
+			snprintf(path, path_size, "%s", name_or_path);
+		}
 	}
-
-	/* Append .png if missing */
 	size_t plen = strlen(path);
 	if (plen < 4 || strcasecmp(path + plen - 4, ".png") != 0) {
-		if (plen + 5 < sizeof(path)) {
+		if (plen + 5 < path_size) {
 			strcat(path, ".png");
 		}
 	}
+}
 
-	uint32_t* pixels = malloc((size_t)width * height * 4);
-	if (!pixels) return 0;
-	render_image(pixels, width, height, cx, cy, zoom);
-
-	cJSON* root = build_state_tree(cx, cy, zoom);
-	if (!root) { free(pixels); return 0; }
+int write_png_with_metadata(const char* path, const uint32_t* pixels,
+                            int width, int height, ViewState* view) {
+	cJSON* root = build_state_tree(view->cx, view->cy, view->zoom);
+	if (!root) return 0;
 	char* json_str = cJSON_PrintUnformatted(root);
 	cJSON_Delete(root);
-	if (!json_str) { free(pixels); return 0; }
+	if (!json_str) return 0;
 
 	FILE* fp = fopen(path, "wb");
-	if (!fp) { free(pixels); free(json_str); return 0; }
+	if (!fp) { free(json_str); return 0; }
 
 	png_structp png = png_create_write_struct(PNG_LIBPNG_VER_STRING, NULL, NULL, NULL);
 	png_infop info = png ? png_create_info_struct(png) : NULL;
 	if (!png || !info) {
 		if (png) png_destroy_write_struct(&png, NULL);
-		fclose(fp); free(pixels); free(json_str);
+		fclose(fp); free(json_str);
 		return 0;
 	}
 	if (setjmp(png_jmpbuf(png))) {
 		png_destroy_write_struct(&png, &info);
-		fclose(fp); free(pixels); free(json_str);
+		fclose(fp); free(json_str);
 		return 0;
 	}
 	png_init_io(png, fp);
@@ -433,6 +439,11 @@ int save_render_png(const char* name_or_path, mpf_t cx, mpf_t cy, mpf_t zoom, in
 	png_write_info(png, info);
 
 	uint8_t* row = malloc((size_t)width * 3);
+	if (!row) {
+		png_destroy_write_struct(&png, &info);
+		fclose(fp); free(json_str);
+		return 0;
+	}
 	for (int y = 0; y < height; y++) {
 		for (int x = 0; x < width; x++) {
 			uint32_t p = pixels[y * width + x];
@@ -447,9 +458,37 @@ int save_render_png(const char* name_or_path, mpf_t cx, mpf_t cy, mpf_t zoom, in
 	png_write_end(png, NULL);
 	png_destroy_write_struct(&png, &info);
 	fclose(fp);
-	free(pixels);
 	free(json_str);
 	return 1;
+}
+
+int save_render_png(const char* name_or_path, mpf_t cx, mpf_t cy, mpf_t zoom,
+                    int width, int height) {
+	if (width < 1) width = 1;
+	if (height < 1) height = 1;
+
+	char path[1024];
+	resolve_save_path(name_or_path, path, sizeof(path));
+
+	ViewState view;
+	mpf_init2(view.cx, 256);
+	mpf_init2(view.cy, 256);
+	mpf_init2(view.zoom, 256);
+	mpf_set(view.cx, cx);
+	mpf_set(view.cy, cy);
+	mpf_set(view.zoom, zoom);
+
+	uint32_t* pixels = malloc((size_t)width * height * 4);
+	if (!pixels) {
+		mpf_clear(view.cx); mpf_clear(view.cy); mpf_clear(view.zoom);
+		return 0;
+	}
+	render_image(pixels, width, height, &view);
+	int ok = write_png_with_metadata(path, pixels, width, height, &view);
+	free(pixels);
+
+	mpf_clear(view.cx); mpf_clear(view.cy); mpf_clear(view.zoom);
+	return ok;
 }
 
 /* ---- Load config from PNG metadata ---- */
@@ -516,26 +555,59 @@ static int load_json_file(const char* path, mpf_t cx, mpf_t cy, mpf_t zoom) {
 /* ---- Dispatcher ---- */
 
 int load_render(const char* name_or_path, mpf_t cx, mpf_t cy, mpf_t zoom) {
+	/* Fresh default config so missing PNG fields (e.g. rotation on pre-rotation
+	   files) resolve to defaults, not stale UI state. */
+	reset_config();
+
 	char path[2048];
 	struct stat st;
+	int found = 0;
 
-	if ((name_or_path[0] == '/' || name_or_path[0] == '.') && stat(name_or_path, &st) == 0) {
-		snprintf(path, sizeof(path), "%s", name_or_path);
-	} else {
+	/* 1. Absolute or explicit relative path */
+	if (name_or_path[0] == '/' || name_or_path[0] == '.') {
+		if (stat(name_or_path, &st) == 0) {
+			snprintf(path, sizeof(path), "%s", name_or_path);
+			found = 1;
+		}
+	}
+
+	/* 2. Try in cwd: as-is, then .png, then .json */
+	if (!found) {
+		if (stat(name_or_path, &st) == 0) {
+			snprintf(path, sizeof(path), "%s", name_or_path);
+			found = 1;
+		}
+		if (!found) {
+			snprintf(path, sizeof(path), "%s.png", name_or_path);
+			if (stat(path, &st) == 0) found = 1;
+		}
+		if (!found) {
+			snprintf(path, sizeof(path), "%s.json", name_or_path);
+			if (stat(path, &st) == 0) found = 1;
+		}
+	}
+
+	/* 3. Fall back to save_dir: as-is, then .png, then .json */
+	if (!found) {
 		char* dir = get_save_dir();
 		if (!dir) return 0;
-		snprintf(path, sizeof(path), "%s/%s.png", dir, name_or_path);
-		if (stat(path, &st) != 0) {
+		snprintf(path, sizeof(path), "%s/%s", dir, name_or_path);
+		if (stat(path, &st) == 0) found = 1;
+		if (!found) {
+			snprintf(path, sizeof(path), "%s/%s.png", dir, name_or_path);
+			if (stat(path, &st) == 0) found = 1;
+		}
+		if (!found) {
 			snprintf(path, sizeof(path), "%s/%s.json", dir, name_or_path);
-			if (stat(path, &st) != 0) {
-				snprintf(path, sizeof(path), "%s/%s", dir, name_or_path);
-			}
+			if (stat(path, &st) == 0) found = 1;
 		}
 		free(dir);
 	}
 
+	if (!found) return 0;
+
 	const char* ext = strrchr(path, '.');
-	if (ext && (strcasecmp(ext, ".png") == 0)) return load_png_config(path, cx, cy, zoom);
+	if (ext && strcasecmp(ext, ".png") == 0) return load_png_config(path, cx, cy, zoom);
 	return load_json_file(path, cx, cy, zoom);
 }
 

@@ -22,7 +22,9 @@ typedef struct {
 	int next_strip_y;
 	int use_perturbation;
 	int use_df64_direct;
-	double x_min, y_min, dx, dy;
+	double view_cx_d, view_cy_d;
+	double dx_scale, dy_scale;
+	double rot_c, rot_s;
 	df64 dx_df, dy_df, ref_off_x_df, ref_off_y_df;
 	df64 view_cx_df, view_cy_df;
 	Uint32 t_start;

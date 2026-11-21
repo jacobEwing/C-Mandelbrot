@@ -35,6 +35,7 @@ typedef struct {
 typedef struct {
 	Palette palette;
 	Options options;
+	double viewRotation; /* radians, ±π; rotates sampling grid about view centre */
 } RenderConfig;
 
 extern RenderConfig config;
