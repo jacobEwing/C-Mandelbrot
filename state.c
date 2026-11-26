@@ -296,7 +296,6 @@ void render_image(uint32_t* pixels, int width, int height, ViewState* view) {
 	double aspect = (double)height / (double)width;
 
 	int use_perturbation = (zoom_d < 1e-28)
-		&& (config.options.endCondition == 0)
 		&& (config.options.recursionDepth == 1);
 	int use_df64 = (zoom_d < 1e-12) && !use_perturbation;
 

@@ -111,10 +111,7 @@ void fill_scaled_background(uint32_t *pixels, const uint32_t *last_pixels,
 	}
 }
 
-static void render_row_double(uint32_t *pixels, int y,
-                              double view_cx, double view_cy,
-                              double dx_step, double dy_step,
-                              double rot_c, double rot_s) {
+static void render_row_double(uint32_t *pixels, int y, double view_cx, double view_cy, double dx_step, double dy_step, double rot_c, double rot_s) {
 	double yi = ((double)y - render_height / 2.0) * dy_step;
 	double cr_row_base = view_cx - yi * rot_s;
 	double ci_row_base = view_cy + yi * rot_c;
@@ -130,10 +127,7 @@ static void render_row_double(uint32_t *pixels, int y,
 	}
 }
 
-static void render_row_perturbation(uint32_t *pixels, int y,
-                                    df64 dx_df, df64 dy_df,
-                                    df64 ref_offset_x, df64 ref_offset_y,
-                                    double rot_c, double rot_s) {
+static void render_row_perturbation(uint32_t *pixels, int y, df64 dx_df, df64 dy_df, df64 ref_offset_x, df64 ref_offset_y, double rot_c, double rot_s) {
 	df64 yi = df_mul_d(dy_df, (double)(y - render_height / 2));
 	df64 dc_row_base  = df_add(df_mul_d(yi, -rot_s), ref_offset_x);
 	df64 dci_row_base = df_add(df_mul_d(yi,  rot_c), ref_offset_y);
@@ -148,10 +142,7 @@ static void render_row_perturbation(uint32_t *pixels, int y,
 	}
 }
 
-static void render_row_df64_direct(uint32_t *pixels, int y,
-                                   df64 dx_df, df64 dy_df,
-                                   df64 view_cx_df, df64 view_cy_df,
-                                   double rot_c, double rot_s) {
+static void render_row_df64_direct(uint32_t *pixels, int y, df64 dx_df, df64 dy_df, df64 view_cx_df, df64 view_cy_df, double rot_c, double rot_s) {
 	df64 yi = df_mul_d(dy_df, (double)(y - render_height / 2));
 	df64 cr_row_base = df_add(view_cx_df, df_mul_d(yi, -rot_s));
 	df64 ci_row_base = df_add(view_cy_df, df_mul_d(yi,  rot_c));
@@ -168,17 +159,13 @@ static void render_row_df64_direct(uint32_t *pixels, int y,
 	}
 }
 
-void begin_render(mpf_t cx, mpf_t cy, mpf_t zoom,
-                  uint32_t *pixels, SDL_Texture *tex, SDL_Renderer *ren,
-                  const uint32_t *last_pixels, int have_last,
-                  mpf_t last_cx, mpf_t last_cy, mpf_t last_zoom) {
+void begin_render(mpf_t cx, mpf_t cy, mpf_t zoom, uint32_t *pixels, SDL_Texture *tex, SDL_Renderer *ren, const uint32_t *last_pixels, int have_last, mpf_t last_cx, mpf_t last_cy, mpf_t last_zoom) {
 	double zoom_d = mpf_get_d(zoom);
 	double cx_d = mpf_get_d(cx);
 	double cy_d = mpf_get_d(cy);
 	double aspect = (double)render_height / render_width;
 
 	render_state.use_perturbation = (zoom_d < 1e-28)
-		&& (config.options.endCondition == 0)
 		&& (config.options.recursionDepth == 1);
 	render_state.use_df64_direct = (zoom_d < 1e-12) && !render_state.use_perturbation;
 	render_state.next_strip_y = 0;

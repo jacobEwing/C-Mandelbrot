@@ -186,21 +186,72 @@ static void compute_orbit_gmp(mpf_t Cx, mpf_t Cy) {
 		ref.dz_real[n] = mpf_to_df64(tmp2);
 		ref.dz_imag[n] = mpf_to_df64(tmp3);
 
+		/* zmag2 (used by perturbation's fast path when endCondition=0) */
 		mpf_mul(tmp2, Zr, Zr);
 		mpf_mul(tmp3, Zi, Zi);
 		mpf_add(tmp2, tmp2, tmp3);
 		ref.zmag2[n] = mpf_to_df64(tmp2);
-
 		double z2 = mpf_get_d(tmp2);
 		if (z2 > ref.max_zmag2) ref.max_zmag2 = z2;
 		if (z2 > config.options.maxRadius - 0.5) ref.near_boundary_count++;
 
-		if (df_gt(ref.zmag2[n], df_from_double(config.options.maxRadius))) {
+		/* escape check matching the pixel's end condition */
+		int escaped = 0;
+		switch (config.options.endCondition) {
+			case 1: {
+				mpf_t zr2, zi2;
+				mpf_init2(zr2, 256); mpf_init2(zi2, 256);
+				mpf_mul(zr2, Zr, Zr);
+				mpf_mul(zi2, Zi, Zi);
+				mpf_mul(zr2, zr2, zi2);
+				escaped = mpf_cmp_d(zr2, config.options.maxRadius) > 0;
+				mpf_clear(zr2); mpf_clear(zi2);
+				break;
+			}
+			case 2: {
+				mpf_t zr2, zi2, d;
+				mpf_init2(zr2, 256); mpf_init2(zi2, 256); mpf_init2(d, 256);
+				mpf_mul(zr2, Zr, Zr);
+				mpf_mul(zi2, Zi, Zi);
+				mpf_sub(d, zr2, zi2);
+				mpf_abs(d, d);
+				escaped = mpf_cmp_d(d, config.options.maxRadius) > 0;
+				mpf_clear(zr2); mpf_clear(zi2); mpf_clear(d);
+				break;
+			}
+			case 3: {
+				mpf_t azr, azi, s;
+				mpf_init2(azr, 256); mpf_init2(azi, 256); mpf_init2(s, 256);
+				mpf_abs(azr, Zr);
+				mpf_abs(azi, Zi);
+				mpf_add(s, azr, azi);
+				escaped = mpf_cmp_d(s, config.options.maxRadius) > 0;
+				mpf_clear(azr); mpf_clear(azi); mpf_clear(s);
+				break;
+			}
+			case 4: {
+				mpf_t azr, azi, d;
+				mpf_init2(azr, 256); mpf_init2(azi, 256); mpf_init2(d, 256);
+				mpf_abs(azr, Zr);
+				mpf_abs(azi, Zi);
+				mpf_sub(d, azr, azi);
+				mpf_abs(d, d);
+				escaped = mpf_cmp_d(d, config.options.maxRadius) > 0;
+				mpf_clear(azr); mpf_clear(azi); mpf_clear(d);
+				break;
+			}
+			default:
+				escaped = mpf_cmp_d(tmp2, config.options.maxRadius) > 0;
+				break;
+		}
+
+		if (escaped) {
 			ref.escaped = 1;
 			ref.escape_iteration = n;
 			ref.length = n + 1;
 			break;
 		}
+
 	}
 
 	mpf_clear(Zr); mpf_clear(Zi); mpf_clear(Cr); mpf_clear(Ci);
@@ -212,13 +263,19 @@ void compute_reference_orbit(mpf_t cx, mpf_t cy, mpf_t zoom) {
 	if (ref.capacity < req_len) {
 		ref.z_real = (df64*)realloc(ref.z_real, req_len * sizeof(df64));
 		ref.z_imag = (df64*)realloc(ref.z_imag, req_len * sizeof(df64));
-		ref.zmag2 = (df64*)realloc(ref.zmag2, req_len * sizeof(df64));
+		ref.zmag2  = (df64*)realloc(ref.zmag2,  req_len * sizeof(df64));
 		ref.dz_real = (df64*)realloc(ref.dz_real, req_len * sizeof(df64));
 		ref.dz_imag = (df64*)realloc(ref.dz_imag, req_len * sizeof(df64));
 		ref.capacity = req_len;
 	}
 
-	compute_orbit_gmp(cx, cy);
+	mpf_t ref_cx, ref_cy;
+	mpf_init2(ref_cx, 256);
+	mpf_init2(ref_cy, 256);
+	mpf_set(ref_cx, cx);
+	mpf_set(ref_cy, cy);
+
+	compute_orbit_gmp(ref_cx, ref_cy);
 
 	if (ref.escaped && ref.escape_iteration < config.options.max_iter - 100) {
 		mpf_t test_x, test_y, offset;
@@ -254,25 +311,38 @@ void compute_reference_orbit(mpf_t cx, mpf_t cy, mpf_t zoom) {
 		}
 
 		compute_orbit_gmp(best_cx, best_cy);
+		mpf_set(ref_cx, best_cx);
+		mpf_set(ref_cy, best_cy);
 
 		mpf_clear(test_x); mpf_clear(test_y); mpf_clear(offset);
 		mpf_clear(best_cx); mpf_clear(best_cy);
 	}
 
-	df64 view_cx_df = mpf_to_df64(cx);
-	df64 view_cy_df = mpf_to_df64(cy);
-	ref.offset_x = df_sub(view_cx_df, ref.c_real);
-	ref.offset_y = df_sub(view_cy_df, ref.c_imag);
+	/* Compute offset in full mpf precision, then convert to df64.
+	   Doing df64(cx) - df64(ref_c) directly loses precision below zoom ~1e-32. */
+	mpf_t off_x_mpf, off_y_mpf;
+	mpf_init2(off_x_mpf, 256);
+	mpf_init2(off_y_mpf, 256);
+	mpf_sub(off_x_mpf, cx, ref_cx);
+	mpf_sub(off_y_mpf, cy, ref_cy);
+	ref.offset_x = mpf_to_df64(off_x_mpf);
+	ref.offset_y = mpf_to_df64(off_y_mpf);
+	mpf_clear(off_x_mpf);
+	mpf_clear(off_y_mpf);
+	mpf_clear(ref_cx);
+	mpf_clear(ref_cy);
 }
 
 Result mandelbrot_perturbation(df64 dc_r, df64 dc_i, int max_iter) {
 	df64 dr = df_from_double(0.0);
 	df64 di = df_from_double(0.0);
 	df64 maxr = df_from_double(config.options.maxRadius);
+	int end_cond = config.options.endCondition;
 	int n = 0;
 
 	while (n < max_iter) {
 		if (n >= ref.length) {
+			/* Ref exhausted (escaped before this pixel) — fall back to direct */
 			df64 cr = df_add(ref.c_real, dc_r);
 			df64 ci = df_add(ref.c_imag, dc_i);
 			df64 zr = df_add(ref.z_real[n - 1], dr);
@@ -280,7 +350,15 @@ Result mandelbrot_perturbation(df64 dc_r, df64 dc_i, int max_iter) {
 			for (; n < max_iter; n++) {
 				df64 zr2 = df_mul(zr, zr);
 				df64 zi2 = df_mul(zi, zi);
-				if (df_gt(df_add(zr2, zi2), maxr)) break;
+				int esc = 0;
+				switch (end_cond) {
+					case 1: esc = df_gt(df_mul(zr2, zi2), maxr); break;
+					case 2: esc = df_gt(df_abs(df_sub(zr2, zi2)), maxr); break;
+					case 3: esc = df_gt(df_add(df_abs(zr), df_abs(zi)), maxr); break;
+					case 4: esc = df_gt(df_abs(df_sub(df_abs(zr), df_abs(zi))), maxr); break;
+					default: esc = df_gt(df_add(zr2, zi2), maxr); break;
+				}
+				if (esc) break;
 				zi = df_add(df_mul_d(df_mul(zr, zi), 2.0), ci);
 				zr = df_add(df_sub(zr2, zi2), cr);
 			}
@@ -297,19 +375,28 @@ Result mandelbrot_perturbation(df64 dc_r, df64 dc_i, int max_iter) {
 		df64 Zr = ref.z_real[n];
 		df64 Zi = ref.z_imag[n];
 
-		df64 Zr_dr = df_mul(Zr, dr);
-		df64 Zi_di = df_mul(Zi, di);
-		df64 cross = df_mul_d(df_add(Zr_dr, Zi_di), 2.0);
+		df64 zr = df_add(Zr, dr);
+		df64 zi = df_add(Zi, di);
 
-		df64 dr2 = df_mul(dr, dr);
-		df64 di2 = df_mul(di, di);
-		df64 dmag2 = df_add(dr2, di2);
+		int escape = 0;
+		if (end_cond == 0) {
+			/* fast path with the precomputed |Z|^2 */
+			df64 cross = df_mul_d(df_add(df_mul(Zr, dr), df_mul(Zi, di)), 2.0);
+			df64 dmag2 = df_add(df_mul(dr, dr), df_mul(di, di));
+			df64 zmag2 = df_add(df_add(ref.zmag2[n], cross), dmag2);
+			escape = df_gt(zmag2, maxr);
+		} else {
+			df64 zr2 = df_mul(zr, zr);
+			df64 zi2 = df_mul(zi, zi);
+			switch (end_cond) {
+				case 1: escape = df_gt(df_mul(zr2, zi2), maxr); break;
+				case 2: escape = df_gt(df_abs(df_sub(zr2, zi2)), maxr); break;
+				case 3: escape = df_gt(df_add(df_abs(zr), df_abs(zi)), maxr); break;
+				case 4: escape = df_gt(df_abs(df_sub(df_abs(zr), df_abs(zi))), maxr); break;
+			}
+		}
 
-		df64 zmag2 = df_add(df_add(ref.zmag2[n], cross), dmag2);
-
-		if (df_gt(zmag2, maxr)) {
-			df64 zr = df_add(Zr, dr);
-			df64 zi = df_add(Zi, di);
+		if (escape) {
 			df64 dz_r = df_sub(df_add(ref.dz_real[n], dr), dc_r);
 			df64 dz_i = df_sub(df_add(ref.dz_imag[n], di), dc_i);
 			Result res = {
@@ -322,17 +409,29 @@ Result mandelbrot_perturbation(df64 dc_r, df64 dc_i, int max_iter) {
 			return res;
 		}
 
+		/* drift correction: if deviation grows too large, switch to direct */
+		df64 dr2 = df_mul(dr, dr);
+		df64 di2 = df_mul(di, di);
+		df64 dmag2 = df_add(dr2, di2);
 		if (df_to_double(dmag2) > 1e-4) {
 			df64 cr = df_add(ref.c_real, dc_r);
 			df64 ci = df_add(ref.c_imag, dc_i);
-			df64 zr_g = df_add(Zr, dr);
-			df64 zi_g = df_add(Zi, di);
+			df64 zr_g = zr;
+			df64 zi_g = zi;
 			for (; n < max_iter; n++) {
-				df64 zr2_g = df_mul(zr_g, zr_g);
-				df64 zi2_g = df_mul(zi_g, zi_g);
-				if (df_gt(df_add(zr2_g, zi2_g), maxr)) break;
+				df64 zr2 = df_mul(zr_g, zr_g);
+				df64 zi2 = df_mul(zi_g, zi_g);
+				int esc = 0;
+				switch (end_cond) {
+					case 1: esc = df_gt(df_mul(zr2, zi2), maxr); break;
+					case 2: esc = df_gt(df_abs(df_sub(zr2, zi2)), maxr); break;
+					case 3: esc = df_gt(df_add(df_abs(zr_g), df_abs(zi_g)), maxr); break;
+					case 4: esc = df_gt(df_abs(df_sub(df_abs(zr_g), df_abs(zi_g))), maxr); break;
+					default: esc = df_gt(df_add(zr2, zi2), maxr); break;
+				}
+				if (esc) break;
 				zi_g = df_add(df_mul_d(df_mul(zr_g, zi_g), 2.0), ci);
-				zr_g = df_add(df_sub(zr2_g, zi2_g), cr);
+				zr_g = df_add(df_sub(zr2, zi2), cr);
 			}
 			Result res = {
 				n,
@@ -344,6 +443,8 @@ Result mandelbrot_perturbation(df64 dc_r, df64 dc_i, int max_iter) {
 			return res;
 		}
 
+		df64 Zr_dr = df_mul(Zr, dr);
+		df64 Zi_di = df_mul(Zi, di);
 		df64 ndr_a = df_mul_d(df_sub(Zr_dr, Zi_di), 2.0);
 		df64 ndr_b = df_sub(dr2, di2);
 		df64 new_dr = df_add(df_add(ndr_a, ndr_b), dc_r);

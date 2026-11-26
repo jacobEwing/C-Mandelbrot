@@ -227,9 +227,13 @@ int main(int argc, char *argv[]) {
 	mpf_init2(view.cx, 256);
 	mpf_init2(view.cy, 256);
 	mpf_init2(view.zoom, 256);
-	mpf_set_d(view.cx, -0.5);
+	mpf_set_d(view.cx, 0.0);
 	mpf_set_d(view.cy, 0.0);
-	mpf_set_d(view.zoom, 4.0);
+	if(render_width > render_height){
+		mpf_set_d(view.zoom, 4.2 * render_width / render_height);
+	}else{
+		mpf_set_d(view.zoom, 4.2 * render_height / render_width);
+	}
 
 	mpf_t last_render_cx, last_render_cy, last_render_zoom;
 	mpf_init2(last_render_cx, 256);
