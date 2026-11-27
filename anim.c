@@ -264,6 +264,9 @@ int anim_run(const AnimOptions* opts) {
 	printf("  size        = %dx%d\n", opts->width, opts->height);
 	printf("  fps         = %d\n", opts->fps);
 	printf("  interpolation = %s\n", interp_str);
+	if (opts->interp_mode == 1) {
+		printf("  catmull tension = %.2f\n", opts->catmull_tension);
+	}
 	printf("  easing      = %s (linear mode only)\n", easing_strs[opts->easing]);
 	printf("  via         = %s", opts->via_bounce ? "bounce" : "none");
 	if (opts->via_bounce) {
@@ -436,7 +439,8 @@ int anim_run(const AnimOptions* opts) {
 		RenderConfig cfg_a, cfg_b;
 		double t_real = 0.0;
 		if (!anim_eval_frame(kfs, n, aug_kfs, n_aug, kf_frames, total_frames,
-		                     i, opts->interp_mode, opts->easing,
+		                     i, opts->interp_mode, opts->catmull_tension,
+		                     opts->easing,
 		                     &cfg_a, &cfg_b, &view, &t_real)) {
 			fprintf(stderr, "\nanim: failed to evaluate frame %d\n", i);
 			failed = 1;
@@ -564,77 +568,94 @@ static double interp_angle_lin(double a, double b, double t) {
 static void catmull_mpfr(mpfr_t out,
                          const mpfr_t p0, const mpfr_t p1,
                          const mpfr_t p2, const mpfr_t p3,
-                         const mpfr_t t) {
-    mpfr_prec_t prec = mpfr_get_prec(t);
-    mpfr_t t2, t3, a, b;
-    mpfr_init2(t2, prec); mpfr_init2(t3, prec);
-    mpfr_init2(a, prec);  mpfr_init2(b, prec);
+                         const mpfr_t t, double tension) {
+	mpfr_prec_t prec = mpfr_get_prec(t);
+	mpfr_t t2, t3, a, b, m0, m1, k;
+	mpfr_init2(t2, prec); mpfr_init2(t3, prec);
+	mpfr_init2(a, prec);  mpfr_init2(b, prec);
+	mpfr_init2(m0, prec); mpfr_init2(m1, prec);
+	mpfr_init2(k, prec);
 
-    mpfr_mul(t2, t, t, MPFR_RNDN);
-    mpfr_mul(t3, t2, t, MPFR_RNDN);
+	mpfr_set_d(k, (1.0 - tension) * 0.5, MPFR_RNDN);
 
-    mpfr_mul_ui(out, p1, 2, MPFR_RNDN);
+	mpfr_mul(t2, t, t, MPFR_RNDN);
+	mpfr_mul(t3, t2, t, MPFR_RNDN);
 
-    mpfr_sub(b, p2, p0, MPFR_RNDN);
-    mpfr_mul(b, b, t, MPFR_RNDN);
-    mpfr_add(out, out, b, MPFR_RNDN);
+	/* m0 = k/2 * (p2 - p0), m1 = k/2 * (p3 - p1) */
+	mpfr_sub(m0, p2, p0, MPFR_RNDN);
+	mpfr_mul(m0, m0, k, MPFR_RNDN);
+	mpfr_sub(m1, p3, p1, MPFR_RNDN);
+	mpfr_mul(m1, m1, k, MPFR_RNDN);
 
-    mpfr_mul_ui(b, p0, 2, MPFR_RNDN);
-    mpfr_mul_ui(a, p1, 5, MPFR_RNDN);
-    mpfr_sub(b, b, a, MPFR_RNDN);
-    mpfr_mul_ui(a, p2, 4, MPFR_RNDN);
-    mpfr_add(b, b, a, MPFR_RNDN);
-    mpfr_sub(b, b, p3, MPFR_RNDN);
-    mpfr_mul(b, b, t2, MPFR_RNDN);
-    mpfr_add(out, out, b, MPFR_RNDN);
+	/* out = h00*p1 + h10*m0 + h01*p2 + h11*m1 */
+	mpfr_mul_ui(a, t3, 2, MPFR_RNDN);
+	mpfr_mul_ui(b, t2, 3, MPFR_RNDN);
+	mpfr_sub(a, a, b, MPFR_RNDN);
+	mpfr_add_ui(a, a, 1, MPFR_RNDN);
+	mpfr_mul(out, p1, a, MPFR_RNDN);
 
-    mpfr_mul_ui(b, p1, 3, MPFR_RNDN);
-    mpfr_sub(b, b, p0, MPFR_RNDN);
-    mpfr_mul_ui(a, p2, 3, MPFR_RNDN);
-    mpfr_sub(b, b, a, MPFR_RNDN);
-    mpfr_add(b, b, p3, MPFR_RNDN);
-    mpfr_mul(b, b, t3, MPFR_RNDN);
-    mpfr_add(out, out, b, MPFR_RNDN);
+	mpfr_set(a, t3, MPFR_RNDN);
+	mpfr_mul_ui(b, t2, 2, MPFR_RNDN);
+	mpfr_sub(a, a, b, MPFR_RNDN);
+	mpfr_add(a, a, t, MPFR_RNDN);
+	mpfr_mul(a, a, m0, MPFR_RNDN);
+	mpfr_add(out, out, a, MPFR_RNDN);
 
-    mpfr_div_ui(out, out, 2, MPFR_RNDN);
-    mpfr_clears(t2, t3, a, b, NULL);
+	mpfr_mul_si(a, t3, -2, MPFR_RNDN);
+	mpfr_mul_ui(b, t2, 3, MPFR_RNDN);
+	mpfr_add(a, a, b, MPFR_RNDN);
+	mpfr_mul(a, a, p2, MPFR_RNDN);
+	mpfr_add(out, out, a, MPFR_RNDN);
+
+	mpfr_sub(a, t3, t2, MPFR_RNDN);
+	mpfr_mul(a, a, m1, MPFR_RNDN);
+	mpfr_add(out, out, a, MPFR_RNDN);
+
+	mpfr_clears(t2, t3, a, b, m0, m1, k, NULL);
 }
 
 /* ---- Catmull-Rom scalar ---- */
 
-static double catmull_scalar(double p0, double p1, double p2, double p3, double t) {
+static double catmull_scalar(double p0, double p1, double p2, double p3,
+                              double t, double tension) {
+	double k = 1.0 - tension;
 	double t2 = t * t, t3 = t2 * t;
-	return 0.5 * (
-		2.0 * p1 +
-		(-p0 + p2) * t +
-		(2.0*p0 - 5.0*p1 + 4.0*p2 - p3) * t2 +
-		(-p0 + 3.0*p1 - 3.0*p2 + p3) * t3
-	);
+	double m0 = k * 0.5 * (p2 - p0);
+	double m1 = k * 0.5 * (p3 - p1);
+	return ( 2.0*t3 - 3.0*t2 + 1.0) * p1
+	     + (        t3 - 2.0*t2 + t) * m0
+	     + (-2.0*t3 + 3.0*t2      ) * p2
+	     + (        t3 -       t2 ) * m1;
 }
 
-static double catmull_angle(double a0, double a1, double a2, double a3, double t) {
+static double catmull_angle(double a0, double a1, double a2, double a3,
+                             double t, double tension) {
 	double u0 = a0;
 	double u1 = u0 + wrap_delta(a1 - u0);
 	double u2 = u1 + wrap_delta(a2 - u1);
 	double u3 = u2 + wrap_delta(a3 - u2);
-	return catmull_scalar(u0, u1, u2, u3, t);
+	return catmull_scalar(u0, u1, u2, u3, t, tension);
 }
 
 /* ---- Unified scalar interpolation ---- */
 
-static double interp_val(double v0, double v1, double v2, double v3, int mode, double t) {
+static double interp_val(double v0, double v1, double v2, double v3,
+                          int mode, double t, double tension) {
 	if (mode == 0) return v1 + (v2 - v1) * t;
-	return catmull_scalar(v0, v1, v2, v3, t);
+	return catmull_scalar(v0, v1, v2, v3, t, tension);
 }
 
-static int interp_val_int(int v0, int v1, int v2, int v3, int mode, double t) {
-	double d = interp_val((double)v0, (double)v1, (double)v2, (double)v3, mode, t);
+static int interp_val_int(int v0, int v1, int v2, int v3,
+                           int mode, double t, double tension) {
+	double d = interp_val((double)v0, (double)v1, (double)v2, (double)v3,
+	                      mode, t, tension);
 	return (int)(d + (d >= 0 ? 0.5 : -0.5));
 }
 
-static double interp_val_angle(double v0, double v1, double v2, double v3, int mode, double t) {
+static double interp_val_angle(double v0, double v1, double v2, double v3,
+                                int mode, double t, double tension) {
 	if (mode == 0) return interp_angle_lin(v1, v2, t);
-	return catmull_angle(v0, v1, v2, v3, t);
+	return catmull_angle(v0, v1, v2, v3, t, tension);
 }
 
 /* ---- View interpolation ---- */
@@ -698,153 +719,151 @@ static void interp_view_linear(mpf_t out_cx, mpf_t out_cy, mpf_t out_zoom,
 // Catmull-Rom mode: 3D curve through (cx, cy, log(zoom)).
 static void interp_view_catmull(mpf_t out_cx, mpf_t out_cy, mpf_t out_zoom,
                                 const ViewState* v0, const ViewState* v1,
-                                const ViewState* v2, const ViewState* v3, double t) {
-    if (t <= 0.0) {
-        mpf_set(out_cx, v1->cx); mpf_set(out_cy, v1->cy); mpf_set(out_zoom, v1->zoom);
-        return;
-    }
-    if (t >= 1.0) {
-        mpf_set(out_cx, v2->cx); mpf_set(out_cy, v2->cy); mpf_set(out_zoom, v2->zoom);
-        return;
-    }
+                                const ViewState* v2, const ViewState* v3,
+                                double t, double tension) {
+	if (t <= 0.0) {
+		mpf_set(out_cx, v1->cx); mpf_set(out_cy, v1->cy); mpf_set(out_zoom, v1->zoom);
+		return;
+	}
+	if (t >= 1.0) {
+		mpf_set(out_cx, v2->cx); mpf_set(out_cy, v2->cy); mpf_set(out_zoom, v2->zoom);
+		return;
+	}
 
-    mpfr_prec_t prec = 256;
-    mpfr_t x0, x1, x2, x3, y0, y1, y2, y3;
-    mpfr_t lz0, lz1, lz2, lz3, lz_t, w_t, s;
-    mpfr_t z1_mp, z2_mp, cx_mp, cy_mp, tmp, t_mp;
-    mpfr_inits2(prec, x0, x1, x2, x3, y0, y1, y2, y3,
-                lz0, lz1, lz2, lz3, lz_t, w_t, s,
-                z1_mp, z2_mp, cx_mp, cy_mp, tmp, t_mp, (mpfr_ptr)0);
+	mpfr_prec_t prec = 256;
+	mpfr_t x0, x1, x2, x3, y0, y1, y2, y3;
+	mpfr_t lz0, lz1, lz2, lz3, lz_t, w_t, s;
+	mpfr_t z1_mp, z2_mp, cx_mp, cy_mp, tmp, t_mp;
+	mpfr_inits2(prec, x0, x1, x2, x3, y0, y1, y2, y3,
+	            lz0, lz1, lz2, lz3, lz_t, w_t, s,
+	            z1_mp, z2_mp, cx_mp, cy_mp, tmp, t_mp, (mpfr_ptr)0);
 
-    mpfr_set_f(x0, v0->cx, MPFR_RNDN);
-    mpfr_set_f(x1, v1->cx, MPFR_RNDN);
-    mpfr_set_f(x2, v2->cx, MPFR_RNDN);
-    mpfr_set_f(x3, v3->cx, MPFR_RNDN);
-    mpfr_set_f(y0, v0->cy, MPFR_RNDN);
-    mpfr_set_f(y1, v1->cy, MPFR_RNDN);
-    mpfr_set_f(y2, v2->cy, MPFR_RNDN);
-    mpfr_set_f(y3, v3->cy, MPFR_RNDN);
+	mpfr_set_f(x0, v0->cx, MPFR_RNDN);
+	mpfr_set_f(x1, v1->cx, MPFR_RNDN);
+	mpfr_set_f(x2, v2->cx, MPFR_RNDN);
+	mpfr_set_f(x3, v3->cx, MPFR_RNDN);
+	mpfr_set_f(y0, v0->cy, MPFR_RNDN);
+	mpfr_set_f(y1, v1->cy, MPFR_RNDN);
+	mpfr_set_f(y2, v2->cy, MPFR_RNDN);
+	mpfr_set_f(y3, v3->cy, MPFR_RNDN);
 
-    mpfr_set_f(z1_mp, v1->zoom, MPFR_RNDN);
-    mpfr_set_f(z2_mp, v2->zoom, MPFR_RNDN);
+	mpfr_set_f(z1_mp, v1->zoom, MPFR_RNDN);
+	mpfr_set_f(z2_mp, v2->zoom, MPFR_RNDN);
 
-    mpfr_set_f(tmp, v0->zoom, MPFR_RNDN); mpfr_log(lz0, tmp, MPFR_RNDN);
-    mpfr_log(lz1, z1_mp, MPFR_RNDN);
-    mpfr_log(lz2, z2_mp, MPFR_RNDN);
-    mpfr_set_f(tmp, v3->zoom, MPFR_RNDN); mpfr_log(lz3, tmp, MPFR_RNDN);
+	mpfr_set_f(tmp, v0->zoom, MPFR_RNDN); mpfr_log(lz0, tmp, MPFR_RNDN);
+	mpfr_log(lz1, z1_mp, MPFR_RNDN);
+	mpfr_log(lz2, z2_mp, MPFR_RNDN);
+	mpfr_set_f(tmp, v3->zoom, MPFR_RNDN); mpfr_log(lz3, tmp, MPFR_RNDN);
 
-    mpfr_set_d(t_mp, t, MPFR_RNDN);
+	mpfr_set_d(t_mp, t, MPFR_RNDN);
 
-    catmull_mpfr(lz_t, lz0, lz1, lz2, lz3, t_mp);
-    mpfr_exp(w_t, lz_t, MPFR_RNDN);
+	catmull_mpfr(lz_t, lz0, lz1, lz2, lz3, t_mp, tension);
+	mpfr_exp(w_t, lz_t, MPFR_RNDN);
 
-    if (mpfr_cmp(z1_mp, z2_mp) == 0) {
-        mpfr_set(s, t_mp, MPFR_RNDN);
-    } else {
-        mpfr_sub(s, w_t, z1_mp, MPFR_RNDN);
-        mpfr_sub(tmp, z2_mp, z1_mp, MPFR_RNDN);
-        mpfr_div(s, s, tmp, MPFR_RNDN);
-    }
+	if (mpfr_cmp(z1_mp, z2_mp) == 0) {
+		mpfr_set(s, t_mp, MPFR_RNDN);
+	} else {
+		mpfr_sub(s, w_t, z1_mp, MPFR_RNDN);
+		mpfr_sub(tmp, z2_mp, z1_mp, MPFR_RNDN);
+		mpfr_div(s, s, tmp, MPFR_RNDN);
+	}
 
-    catmull_mpfr(cx_mp, x0, x1, x2, x3, s);
-    catmull_mpfr(cy_mp, y0, y1, y2, y3, s);
+	catmull_mpfr(cx_mp, x0, x1, x2, x3, s, tension);
+	catmull_mpfr(cy_mp, y0, y1, y2, y3, s, tension);
 
-    mpfr_get_f(out_cx, cx_mp, MPFR_RNDN);
-    mpfr_get_f(out_cy, cy_mp, MPFR_RNDN);
-    mpfr_get_f(out_zoom, w_t, MPFR_RNDN);
+	mpfr_get_f(out_cx, cx_mp, MPFR_RNDN);
+	mpfr_get_f(out_cy, cy_mp, MPFR_RNDN);
+	mpfr_get_f(out_zoom, w_t, MPFR_RNDN);
 
-    mpfr_clears(x0, x1, x2, x3, y0, y1, y2, y3,
-                lz0, lz1, lz2, lz3, lz_t, w_t, s,
-                z1_mp, z2_mp, cx_mp, cy_mp, tmp, t_mp, (mpfr_ptr)0);
+	mpfr_clears(x0, x1, x2, x3, y0, y1, y2, y3,
+	            lz0, lz1, lz2, lz3, lz_t, w_t, s,
+	            z1_mp, z2_mp, cx_mp, cy_mp, tmp, t_mp, (mpfr_ptr)0);
 }
 
 /* ---- Config continuous interpolation ---- */
 
 static void interp_config_cont(const RenderConfig* c0, const RenderConfig* c1,
                                const RenderConfig* c2, const RenderConfig* c3,
-                               int mode, double t, RenderConfig* out) {
-	/* options — continuous */
+                               int mode, double t, double tension,
+                               RenderConfig* out) {
 	out->options.max_iter = interp_val_int(
 		c0->options.max_iter, c1->options.max_iter,
-		c2->options.max_iter, c3->options.max_iter, mode, t);
+		c2->options.max_iter, c3->options.max_iter, mode, t, tension);
 	if (out->options.max_iter < 1) out->options.max_iter = 1;
 
 	out->options.maxRadius = interp_val(
 		c0->options.maxRadius, c1->options.maxRadius,
-		c2->options.maxRadius, c3->options.maxRadius, mode, t);
+		c2->options.maxRadius, c3->options.maxRadius, mode, t, tension);
 	out->options.countOffset = interp_val(
 		c0->options.countOffset, c1->options.countOffset,
-		c2->options.countOffset, c3->options.countOffset, mode, t);
+		c2->options.countOffset, c3->options.countOffset, mode, t, tension);
 
 	out->options.coefIterations = interp_val(
 		c0->options.coefIterations, c1->options.coefIterations,
-		c2->options.coefIterations, c3->options.coefIterations, mode, t);
+		c2->options.coefIterations, c3->options.coefIterations, mode, t, tension);
 	out->options.coefDisplacement = interp_val(
 		c0->options.coefDisplacement, c1->options.coefDisplacement,
-		c2->options.coefDisplacement, c3->options.coefDisplacement, mode, t);
+		c2->options.coefDisplacement, c3->options.coefDisplacement, mode, t, tension);
 	out->options.coefRotation = interp_val(
 		c0->options.coefRotation, c1->options.coefRotation,
-		c2->options.coefRotation, c3->options.coefRotation, mode, t);
+		c2->options.coefRotation, c3->options.coefRotation, mode, t, tension);
 	out->options.coefDisplacementXOR = interp_val(
 		c0->options.coefDisplacementXOR, c1->options.coefDisplacementXOR,
-		c2->options.coefDisplacementXOR, c3->options.coefDisplacementXOR, mode, t);
+		c2->options.coefDisplacementXOR, c3->options.coefDisplacementXOR, mode, t, tension);
 	out->options.coefPolarCoordXOR = interp_val(
 		c0->options.coefPolarCoordXOR, c1->options.coefPolarCoordXOR,
-		c2->options.coefPolarCoordXOR, c3->options.coefPolarCoordXOR, mode, t);
+		c2->options.coefPolarCoordXOR, c3->options.coefPolarCoordXOR, mode, t, tension);
 
-	/* palette — continuous */
 	out->palette.colourWavePeriod = interp_val(
 		c0->palette.colourWavePeriod, c1->palette.colourWavePeriod,
-		c2->palette.colourWavePeriod, c3->palette.colourWavePeriod, mode, t);
+		c2->palette.colourWavePeriod, c3->palette.colourWavePeriod, mode, t, tension);
 	if (out->palette.colourWavePeriod < 1e-6)
 		out->palette.colourWavePeriod = 1e-6;
 
 	out->palette.masterOffset = interp_val_angle(
 		c0->palette.masterOffset, c1->palette.masterOffset,
-		c2->palette.masterOffset, c3->palette.masterOffset, mode, t);
+		c2->palette.masterOffset, c3->palette.masterOffset, mode, t, tension);
 	out->palette.redOffset = interp_val_angle(
 		c0->palette.redOffset, c1->palette.redOffset,
-		c2->palette.redOffset, c3->palette.redOffset, mode, t);
+		c2->palette.redOffset, c3->palette.redOffset, mode, t, tension);
 	out->palette.greenOffset = interp_val_angle(
 		c0->palette.greenOffset, c1->palette.greenOffset,
-		c2->palette.greenOffset, c3->palette.greenOffset, mode, t);
+		c2->palette.greenOffset, c3->palette.greenOffset, mode, t, tension);
 	out->palette.blueOffset = interp_val_angle(
 		c0->palette.blueOffset, c1->palette.blueOffset,
-		c2->palette.blueOffset, c3->palette.blueOffset, mode, t);
+		c2->palette.blueOffset, c3->palette.blueOffset, mode, t, tension);
 
 	out->palette.masterStagger = interp_val(
 		c0->palette.masterStagger, c1->palette.masterStagger,
-		c2->palette.masterStagger, c3->palette.masterStagger, mode, t);
+		c2->palette.masterStagger, c3->palette.masterStagger, mode, t, tension);
 	out->palette.redStagger = interp_val(
 		c0->palette.redStagger, c1->palette.redStagger,
-		c2->palette.redStagger, c3->palette.redStagger, mode, t);
+		c2->palette.redStagger, c3->palette.redStagger, mode, t, tension);
 	out->palette.greenStagger = interp_val(
 		c0->palette.greenStagger, c1->palette.greenStagger,
-		c2->palette.greenStagger, c3->palette.greenStagger, mode, t);
+		c2->palette.greenStagger, c3->palette.greenStagger, mode, t, tension);
 	out->palette.blueStagger = interp_val(
 		c0->palette.blueStagger, c1->palette.blueStagger,
-		c2->palette.blueStagger, c3->palette.blueStagger, mode, t);
+		c2->palette.blueStagger, c3->palette.blueStagger, mode, t, tension);
 
 	out->palette.redPeriod = interp_val(
 		c0->palette.redPeriod, c1->palette.redPeriod,
-		c2->palette.redPeriod, c3->palette.redPeriod, mode, t);
+		c2->palette.redPeriod, c3->palette.redPeriod, mode, t, tension);
 	if (out->palette.redPeriod < 1e-6) out->palette.redPeriod = 1e-6;
 	out->palette.greenPeriod = interp_val(
 		c0->palette.greenPeriod, c1->palette.greenPeriod,
-		c2->palette.greenPeriod, c3->palette.greenPeriod, mode, t);
+		c2->palette.greenPeriod, c3->palette.greenPeriod, mode, t, tension);
 	if (out->palette.greenPeriod < 1e-6) out->palette.greenPeriod = 1e-6;
 	out->palette.bluePeriod = interp_val(
 		c0->palette.bluePeriod, c1->palette.bluePeriod,
-		c2->palette.bluePeriod, c3->palette.bluePeriod, mode, t);
+		c2->palette.bluePeriod, c3->palette.bluePeriod, mode, t, tension);
 	if (out->palette.bluePeriod < 1e-6) out->palette.bluePeriod = 1e-6;
 
-    /* direct interpolation (no shortest-arc wrap) so users can spin multiple
-       turns; matches the raw-value semantics of the widened rotation slider */
 	out->viewRotation = interp_val(
 		c0->viewRotation, c1->viewRotation,
-		c2->viewRotation, c3->viewRotation, mode, t);
+		c2->viewRotation, c3->viewRotation, mode, t, tension);
 
-	/* discrete — copy from c1 (caller will override for the b-side config) */
+	/* discrete — copy from c1 (caller overrides for the b-side config) */
 	out->options.recursionDepth = c1->options.recursionDepth;
 	out->options.endCondition = c1->options.endCondition;
 	out->options.calcIterations = c1->options.calcIterations;
@@ -933,7 +952,7 @@ static int aug_build(const AnimKeyframe* real, int n_real,
 
 			/* config: linear midpoint of continuous; discrete from A */
 			interp_config_cont(&a->config, &a->config, &b->config, &b->config,
-			                   0, 0.5, &kfs[mid].config);
+			                   0, 0.5, 0.0, &kfs[mid].config);
 		}
 	}
 
@@ -1008,7 +1027,8 @@ int anim_resolve_total_frames(const AnimOptions* opts, int n_kf) {
 int anim_eval_frame(const AnimKeyframe* real_kfs, int n_real,
                     const AnimKeyframe* aug_kfs, int n_aug,
                     const int* kf_frames, int total_frames,
-                    int frame_idx, int interp_mode, int easing,
+                    int frame_idx, int interp_mode, double catmull_tension,
+                    int easing,
                     RenderConfig* out_config_a, RenderConfig* out_config_b,
                     ViewState* out_view, double* out_t_real) {
 	if (n_real < 2 || !real_kfs || !aug_kfs || !kf_frames) return 0;
@@ -1050,6 +1070,7 @@ int anim_eval_frame(const AnimKeyframe* real_kfs, int n_real,
 	double t_aug_eased = (interp_mode == 0) ? ease(easing, t_aug) : t_aug;
 	double t_real_eased = (interp_mode == 0) ? ease(easing, t_real) : t_real;
 
+	/* View: catmull-rom (with tension) or linear */
 	if (interp_mode == 1) {
 		int i1 = seg_aug;
 		int i2 = seg_aug + 1;
@@ -1058,18 +1079,22 @@ int anim_eval_frame(const AnimKeyframe* real_kfs, int n_real,
 
 		interp_view_catmull(out_view->cx, out_view->cy, out_view->zoom,
 		                    &aug_kfs[i0].view, &aug_kfs[i1].view,
-		                    &aug_kfs[i2].view, &aug_kfs[i3].view, t_aug);
-		interp_config_cont(&aug_kfs[i0].config, &aug_kfs[i1].config,
-		                   &aug_kfs[i2].config, &aug_kfs[i3].config,
-		                   1, t_aug, out_config_a);
+		                    &aug_kfs[i2].view, &aug_kfs[i3].view,
+		                    t_aug, catmull_tension);
 	} else {
 		const AnimKeyframe* a = &aug_kfs[seg_aug];
 		const AnimKeyframe* b = &aug_kfs[seg_aug + 1];
-
 		interp_view_linear(out_view->cx, out_view->cy, out_view->zoom,
 		                   &a->view, &b->view, t_aug_eased);
+	}
+
+	/* Config parameters: always linear (with easing) to prevent overshoot
+	   in colour coefficients and palette periods. */
+	{
+		const AnimKeyframe* a = &aug_kfs[seg_aug];
+		const AnimKeyframe* b = &aug_kfs[seg_aug + 1];
 		interp_config_cont(&a->config, &a->config, &b->config, &b->config,
-		                   0, t_aug_eased, out_config_a);
+		                   0, t_aug_eased, 0.0, out_config_a);
 	}
 
 	*out_config_b = *out_config_a;

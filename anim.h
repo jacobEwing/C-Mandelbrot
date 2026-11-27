@@ -25,6 +25,7 @@ typedef struct {
 
 	// interpolation
 	int interp_mode;     // 0=linear, 1=catmull-rom
+	double catmull_tension;   // 0=uniform catmull, 1=smoothstep (ignored for linear)
 	int easing;          // 0=linear,1=ease-in,2=ease-out,3=ease-in-out,4=smoothstep
 	int via_bounce;      // 0=none, 1=bounce
 	double bounce_factor;
@@ -76,10 +77,10 @@ int anim_run(const AnimOptions* opts);
 int anim_eval_frame(const AnimKeyframe* real_kfs, int n_real,
                     const AnimKeyframe* aug_kfs, int n_aug,
                     const int* kf_frames, int total_frames,
-                    int frame_idx, int interp_mode, int easing,
+                    int frame_idx, int interp_mode, double catmull_tension,
+                    int easing,
                     RenderConfig* out_config_a, RenderConfig* out_config_b,
                     ViewState* out_view, double* out_t_real);
-
 // Compute total_frames from --total-frames / --duration*fps / --frames-per-transition,
 // with warnings for lower-priority ignored options.
 int anim_resolve_total_frames(const AnimOptions* opts, int n_kf);

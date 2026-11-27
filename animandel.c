@@ -17,6 +17,7 @@ static void print_usage(const char* prog) {
 		"  --duration=SECONDS\n"
 		"  --frames-per-transition=N  default: 90\n"
 		"  --interpolation=MODE       linear|catmull-rom (default: catmull-rom)\n"
+		"  --catmull-tension=N        0=uniform, 1=smoothstep (default: 0)\n"
 		"  --via=MODE                 none|bounce (default: none)\n"
 		"  --bounce-factor=N          default: 10\n"
 		"  --bounce-min=W             default: 0.01\n"
@@ -61,6 +62,8 @@ int main(int argc, char* argv[]) {
 	opts.pixfmt = 0;                   // yuv420p
 	opts.jobs = 1;
 	opts.single_frame = -1;
+	opts.interp_mode = 1;              // catmull-rom
+	opts.catmull_tension = 0.0;
 
 	const char** keyframes = calloc(argc, sizeof(char*));
 	if (!keyframes) return 1;
@@ -91,6 +94,11 @@ int main(int argc, char* argv[]) {
 			if (strcmp(v, "linear") == 0) opts.interp_mode = 0;
 			else if (strcmp(v, "catmull-rom") == 0) opts.interp_mode = 1;
 			else { fprintf(stderr, "bad --interpolation\n"); free(keyframes); return 1; }
+		}
+		else if (strncmp(a, "--catmull-tension=", 18) == 0) {
+			opts.catmull_tension = atof(a + 18);
+			if (opts.catmull_tension < 0.0) opts.catmull_tension = 0.0;
+			if (opts.catmull_tension > 1.0) opts.catmull_tension = 1.0;
 		}
 		else if (strncmp(a, "--via=", 6) == 0) {
 			const char* v = a + 6;
