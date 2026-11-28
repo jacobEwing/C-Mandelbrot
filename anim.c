@@ -673,12 +673,14 @@ static void interp_view_linear(mpf_t out_cx, mpf_t out_cy, mpf_t out_zoom,
 	}
 
 	mpfr_t wa, wb, w, lwa, lwb, x0, x1, y0, y1, dx, dy, den, ratio;
+	mpfr_t wap, wbp, wp;
 	mpfr_init2(wa, 256); mpfr_init2(wb, 256); mpfr_init2(w, 256);
 	mpfr_init2(lwa, 256); mpfr_init2(lwb, 256);
 	mpfr_init2(x0, 256); mpfr_init2(x1, 256);
 	mpfr_init2(y0, 256); mpfr_init2(y1, 256);
 	mpfr_init2(dx, 256); mpfr_init2(dy, 256);
 	mpfr_init2(den, 256); mpfr_init2(ratio, 256);
+	mpfr_init2(wap, 256); mpfr_init2(wbp, 256); mpfr_init2(wp, 256);
 
 	mpfr_set_f(wa, a->zoom, MPFR_RNDN);
 	mpfr_set_f(wb, b->zoom, MPFR_RNDN);
@@ -695,11 +697,16 @@ static void interp_view_linear(mpf_t out_cx, mpf_t out_cy, mpf_t out_zoom,
 	mpfr_set_f(y0, a->cy, MPFR_RNDN);
 	mpfr_set_f(y1, b->cy, MPFR_RNDN);
 
-	mpfr_sub(den, wb, wa, MPFR_RNDN);
+	/* f(w) = w^2 */
+	mpfr_mul(wap, wa, wa, MPFR_RNDN);
+	mpfr_mul(wbp, wb, wb, MPFR_RNDN);
+	mpfr_mul(wp,  w,  w,  MPFR_RNDN);
+
+	mpfr_sub(den, wbp, wap, MPFR_RNDN);
 	if (mpfr_zero_p(den)) {
 		mpfr_set_d(ratio, t, MPFR_RNDN);
 	} else {
-		mpfr_sub(ratio, w, wa, MPFR_RNDN);
+		mpfr_sub(ratio, wp, wap, MPFR_RNDN);
 		mpfr_div(ratio, ratio, den, MPFR_RNDN);
 	}
 
@@ -713,7 +720,8 @@ static void interp_view_linear(mpf_t out_cx, mpf_t out_cy, mpf_t out_zoom,
 	mpfr_add(dy, dy, y0, MPFR_RNDN);
 	mpfr_get_f(out_cy, dy, MPFR_RNDN);
 
-	mpfr_clears(wa, wb, w, lwa, lwb, x0, x1, y0, y1, dx, dy, den, ratio, (mpfr_ptr)0);
+	mpfr_clears(wa, wb, w, lwa, lwb, x0, x1, y0, y1, dx, dy, den, ratio,
+	            wap, wbp, wp, (mpfr_ptr)0);
 }
 
 // Catmull-Rom mode: 3D curve through (cx, cy, log(zoom)).
@@ -734,9 +742,11 @@ static void interp_view_catmull(mpf_t out_cx, mpf_t out_cy, mpf_t out_zoom,
 	mpfr_t x0, x1, x2, x3, y0, y1, y2, y3;
 	mpfr_t lz0, lz1, lz2, lz3, lz_t, w_t, s;
 	mpfr_t z1_mp, z2_mp, cx_mp, cy_mp, tmp, t_mp;
+	mpfr_t z1p, z2p, wtp;
 	mpfr_inits2(prec, x0, x1, x2, x3, y0, y1, y2, y3,
 	            lz0, lz1, lz2, lz3, lz_t, w_t, s,
-	            z1_mp, z2_mp, cx_mp, cy_mp, tmp, t_mp, (mpfr_ptr)0);
+	            z1_mp, z2_mp, cx_mp, cy_mp, tmp, t_mp,
+	            z1p, z2p, wtp, (mpfr_ptr)0);
 
 	mpfr_set_f(x0, v0->cx, MPFR_RNDN);
 	mpfr_set_f(x1, v1->cx, MPFR_RNDN);
@@ -760,11 +770,19 @@ static void interp_view_catmull(mpf_t out_cx, mpf_t out_cy, mpf_t out_zoom,
 	catmull_mpfr(lz_t, lz0, lz1, lz2, lz3, t_mp, tension);
 	mpfr_exp(w_t, lz_t, MPFR_RNDN);
 
-	if (mpfr_cmp(z1_mp, z2_mp) == 0) {
+	/* Screen-relative reparametrization using f(w) = w^2 so the target
+	   centres early on deep zooms (see interp_view_linear for the
+	   matching change). Falls back to plain t if the segment has no
+	   zoom change. */
+	mpfr_mul(z1p, z1_mp, z1_mp, MPFR_RNDN);
+	mpfr_mul(z2p, z2_mp, z2_mp, MPFR_RNDN);
+	mpfr_mul(wtp, w_t, w_t, MPFR_RNDN);
+
+	if (mpfr_cmp(z1p, z2p) == 0) {
 		mpfr_set(s, t_mp, MPFR_RNDN);
 	} else {
-		mpfr_sub(s, w_t, z1_mp, MPFR_RNDN);
-		mpfr_sub(tmp, z2_mp, z1_mp, MPFR_RNDN);
+		mpfr_sub(s, wtp, z1p, MPFR_RNDN);
+		mpfr_sub(tmp, z2p, z1p, MPFR_RNDN);
 		mpfr_div(s, s, tmp, MPFR_RNDN);
 	}
 
@@ -777,7 +795,8 @@ static void interp_view_catmull(mpf_t out_cx, mpf_t out_cy, mpf_t out_zoom,
 
 	mpfr_clears(x0, x1, x2, x3, y0, y1, y2, y3,
 	            lz0, lz1, lz2, lz3, lz_t, w_t, s,
-	            z1_mp, z2_mp, cx_mp, cy_mp, tmp, t_mp, (mpfr_ptr)0);
+	            z1_mp, z2_mp, cx_mp, cy_mp, tmp, t_mp,
+	            z1p, z2p, wtp, (mpfr_ptr)0);
 }
 
 /* ---- Config continuous interpolation ---- */
@@ -1067,8 +1086,8 @@ int anim_eval_frame(const AnimKeyframe* real_kfs, int n_real,
 	if (seg_aug < 0) seg_aug = 0;
 	if (seg_aug >= n_aug - 1) seg_aug = n_aug - 2;
 
-	double t_aug_eased = (interp_mode == 0) ? ease(easing, t_aug) : t_aug;
-	double t_real_eased = (interp_mode == 0) ? ease(easing, t_real) : t_real;
+	double t_aug_eased = ease(easing, t_aug);
+	double t_real_eased = ease(easing, t_real);
 
 	/* View: catmull-rom (with tension) or linear */
 	if (interp_mode == 1) {
