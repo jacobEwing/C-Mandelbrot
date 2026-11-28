@@ -186,11 +186,6 @@ static int encode_video(const AnimOptions* opts, const char* frames_dir, const c
 	int is_webm = (ext && strcasecmp(ext, ".webm") == 0);
 	int is_mp4  = (ext && strcasecmp(ext, ".mp4")  == 0);
 
-	if (opts->pixfmt == 0 && ((opts->width % 2) || (opts->height % 2))) {
-		fprintf(stderr, "anim: warning: yuv420p requires even width/height; "
-		                "use --pixfmt=yuv444p or even dimensions\n");
-	}
-
 	char codec_opts[256];
 	if (opts->codec == 1 || is_webm) {
 		snprintf(codec_opts, sizeof(codec_opts),
@@ -204,7 +199,7 @@ static int encode_video(const AnimOptions* opts, const char* frames_dir, const c
 
 	char cmd[4096];
 	snprintf(cmd, sizeof(cmd),
-	         "ffmpeg -y -loglevel error -framerate %d "
+	         "ffmpeg -y -loglevel error -stats -framerate %d "
 	         "-i '%s/frame_%%05d.png' %s -pix_fmt %s %s '%s'",
 	         opts->fps, frames_dir, codec_opts, pixfmt, movflags, output);
 
@@ -267,7 +262,7 @@ int anim_run(const AnimOptions* opts) {
 	if (opts->interp_mode == 1) {
 		printf("  catmull tension = %.2f\n", opts->catmull_tension);
 	}
-	printf("  easing      = %s (linear mode only)\n", easing_strs[opts->easing]);
+	printf("  easing      = %s\n", easing_strs[opts->easing]);
 	printf("  via         = %s", opts->via_bounce ? "bounce" : "none");
 	if (opts->via_bounce) {
 		printf(" (factor=%.2f, min=%g)", opts->bounce_factor, opts->bounce_min);
@@ -303,17 +298,21 @@ int anim_run(const AnimOptions* opts) {
 		                "(need >= 2 per segment)\n");
 	}
 
-	/* Keyframe → frame index map */
+	/* Defensive: makes n >= 2 visible to GCC's VRP so the malloc below
+	   doesn't trigger -Walloc-size-larger-than. */
 	if (n < 2) {
-		/* defensive: already guaranteed above, but helps GCC's value-range
-		   analysis see that n >= 2 here and silence -Walloc-size-larger-than */
+		fprintf(stderr, "anim: internal error: n < 2 after earlier checks\n");
 		aug_free(aug_kfs, n_aug);
 		anim_free_keyframes(kfs, n);
 		return 1;
 	}
-	int* kf_frames = malloc(sizeof(int) * (size_t)n);
 
-	if (!kf_frames) { aug_free(aug_kfs, n_aug); anim_free_keyframes(kfs, n); return 1; }
+	int* kf_frames = malloc(sizeof(int) * (size_t)n);
+	if (!kf_frames) {
+		aug_free(aug_kfs, n_aug);
+		anim_free_keyframes(kfs, n);
+		return 1;
+	}
 	compute_kf_frames(total_frames, n, kf_frames);
 
 	/* ---- Classify output destination ---- */
@@ -334,7 +333,9 @@ int anim_run(const AnimOptions* opts) {
 	if (!out_is_dir && !out_is_png && !out_is_movie) {
 		fprintf(stderr, "anim: output '%s' is not a movie (.mp4/.mkv/.webm), "
 		                "a .png, or an existing directory\n", output);
-		free(kf_frames); aug_free(aug_kfs, n_aug); anim_free_keyframes(kfs, n);
+		free(kf_frames);
+		aug_free(aug_kfs, n_aug);
+		anim_free_keyframes(kfs, n);
 		return 1;
 	}
 
@@ -342,6 +343,50 @@ int anim_run(const AnimOptions* opts) {
 	if (out_is_png && single_frame_mode < 0) single_frame_mode = 0;
 	if (single_frame_mode >= total_frames) single_frame_mode = total_frames - 1;
 	if (single_frame_mode < -1) single_frame_mode = -1;
+
+	/* ---- Preflight (before any filesystem side effects) ---- */
+	int will_encode = !out_is_dir && !out_is_png &&
+	                  !opts->render_only && single_frame_mode < 0;
+
+	if (will_encode && system("command -v ffmpeg >/dev/null 2>&1") != 0) {
+		fprintf(stderr, "anim: ffmpeg not found. Install with: sudo apt install ffmpeg\n");
+		free(kf_frames); aug_free(aug_kfs, n_aug); anim_free_keyframes(kfs, n);
+		return 1;
+	}
+
+	if (will_encode && opts->pixfmt == 0 &&
+	    ((opts->width % 2) || (opts->height % 2))) {
+		fprintf(stderr,
+			"anim: error: yuv420p requires even width and height (got %dx%d).\n"
+			"  Use --pixfmt=yuv444p, or adjust dimensions to even values.\n",
+			opts->width, opts->height);
+		free(kf_frames); aug_free(aug_kfs, n_aug); anim_free_keyframes(kfs, n);
+		return 1;
+	}
+
+	if (out_is_movie) {
+		char parent[1024];
+		const char* slash = strrchr(output, '/');
+		if (slash) {
+			snprintf(parent, sizeof(parent), "%.*s",
+			         (int)(slash - output), output);
+		} else {
+			snprintf(parent, sizeof(parent), ".");
+		}
+		struct stat pst;
+		if (stat(parent, &pst) != 0 || !S_ISDIR(pst.st_mode)) {
+			fprintf(stderr, "anim: error: parent directory '%s' does not exist\n",
+			        parent);
+			free(kf_frames); aug_free(aug_kfs, n_aug); anim_free_keyframes(kfs, n);
+			return 1;
+		}
+		if (access(parent, W_OK) != 0) {
+			fprintf(stderr, "anim: error: parent directory '%s' is not writable\n",
+			        parent);
+			free(kf_frames); aug_free(aug_kfs, n_aug); anim_free_keyframes(kfs, n);
+			return 1;
+		}
+	}
 
 	char frames_dir[1024];
 	frames_dir[0] = '\0';
@@ -371,12 +416,6 @@ int anim_run(const AnimOptions* opts) {
 		}
 		own_tmpdir = 1;
 		do_encode = 1;
-	}
-
-	if (do_encode && system("command -v ffmpeg >/dev/null 2>&1") != 0) {
-		fprintf(stderr, "anim: ffmpeg not found. Install with: sudo apt install ffmpeg\n");
-		free(kf_frames); aug_free(aug_kfs, n_aug); anim_free_keyframes(kfs, n);
-		return 1;
 	}
 
 	/* ---- Render loop ---- */
@@ -412,6 +451,8 @@ int anim_run(const AnimOptions* opts) {
 	double frame_time_sum = 0.0;
 	int n_rendered = 0;
 	int failed = 0;
+
+	double t_render_start = now_seconds();
 
 	for (int i = first; i <= last; i++) {
 		char fpath[2048];
@@ -481,14 +522,19 @@ int anim_run(const AnimOptions* opts) {
 		if (is_tty) {
 			double avg = n_rendered ? frame_time_sum / n_rendered : frame_time;
 			int eta = (int)((last - i) * avg);
-			fprintf(stderr, "\r  [%d/%d] %s  %.2fs  eta %d:%02d       ",
-			        done, total, path_basename(fpath), frame_time, eta / 60, eta % 60);
+			int pct = (int)(100.0 * done / total);
+			fprintf(stderr, "\r  [%d/%d] %3d%%  %s  %.2fs  eta %d:%02d       ",
+			        done, total, pct, path_basename(fpath), frame_time,
+			        eta / 60, eta % 60);
 		} else {
 			printf("frame %d/%d: %s (%.2fs)\n", done, total, fpath, frame_time);
 		}
 	}
 
 	if (is_tty) fprintf(stderr, "\n");
+
+	double t_render_end = now_seconds();
+	double t_render_elapsed = t_render_end - t_render_start;
 
 	mpf_clear(view.cx);
 	mpf_clear(view.cy);
@@ -505,26 +551,66 @@ int anim_run(const AnimOptions* opts) {
 		return 1;
 	}
 
-	/* ---- Encode ---- */
+	/* Frame-existence safety net before encode */
 	if (do_encode && !opts->render_only && single_frame_mode < 0) {
-		if (!encode_video(opts, frames_dir, output)) {
+		int missing = 0;
+		for (int i = 0; i < total_frames; i++) {
+			char fpath[2048];
+			snprintf(fpath, sizeof(fpath), "%s/frame_%05d.png", frames_dir, i);
+			struct stat st;
+			if (stat(fpath, &st) != 0 || st.st_size == 0) {
+				fprintf(stderr, "anim: error: missing frame %d (%s); cannot encode\n",
+				        i, fpath);
+				missing++;
+				if (missing > 3) {
+					fprintf(stderr, "anim: (further missing frames suppressed)\n");
+					break;
+				}
+			}
+		}
+		if (missing > 0) {
+			if (own_tmpdir && !opts->keep_frames) {
+				char cmd[2048];
+				snprintf(cmd, sizeof(cmd), "rm -rf '%s'", frames_dir);
+				run_shell(cmd);
+			}
+			free(kf_frames); aug_free(aug_kfs, n_aug); anim_free_keyframes(kfs, n);
+			return 1;
+		}
+	}
+
+	/* Encode (exactly once) */
+	double t_encode_elapsed = 0.0;
+	if (do_encode && !opts->render_only && single_frame_mode < 0) {
+		double t_encode_start = now_seconds();
+		int enc_ok = encode_video(opts, frames_dir, output);
+		t_encode_elapsed = now_seconds() - t_encode_start;
+		if (!enc_ok) {
 			fprintf(stderr, "anim: encoding failed; frames left in %s\n", frames_dir);
 			free(kf_frames); aug_free(aug_kfs, n_aug); anim_free_keyframes(kfs, n);
 			return 1;
 		}
 	}
 
-	/* ---- Cleanup tmpdir ---- */
+	/* Cleanup tmpdir (once, after encode) */
 	if (own_tmpdir && !opts->keep_frames) {
 		char cmd[2048];
 		snprintf(cmd, sizeof(cmd), "rm -rf '%s'", frames_dir);
 		run_shell(cmd);
 	}
 
+	/* Summary */
 	if (do_encode && single_frame_mode < 0) {
-		printf("Wrote %s\n", output);
+		struct stat st;
+		long size_kb = 0;
+		if (stat(output, &st) == 0) size_kb = (long)(st.st_size / 1024);
+		printf("Wrote %s (%d frames, %dx%d, render %.1fs, encode %.1fs, %ld KB)\n",
+		       output, total_frames, opts->width, opts->height,
+		       t_render_elapsed, t_encode_elapsed, size_kb);
 	} else if (!out_is_png) {
-		printf("Frames written to %s\n", frames_dir);
+		printf("Frames written to %s (%d frames, %dx%d, %.1fs)\n",
+		       frames_dir, last - first + 1, opts->width, opts->height,
+		       t_render_elapsed);
 	}
 
 	free(kf_frames);
